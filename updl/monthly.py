@@ -25,7 +25,10 @@ from typing import Optional
 from .client import HttpClient
 from .config import Settings
 from .derive import run_derive
+from .errors import ProbeMissing
+from .export import DEFAULT_EVERY_MIN, copy_to_phone, run_export
 from .plan import run_download
+from .probe import check_probe_fresh, run_probe
 from .sessions import Calendar, load_calendar
 from .state import State
 from .store import atomic_write_bytes, compact, date_of_part, list_parts
@@ -103,15 +106,21 @@ def _package_month_output(settings: Settings, batch_no: int, start_d: dt.date, e
                 shutil.copy2(p, dest)
                 copied_files += 1
 
-    if (settings.reports_dir / "health.csv").exists():
-        shutil.copy2(settings.reports_dir / "health.csv", month_dir / "health.csv")
+    for rep in ("health.csv", "health_summary.txt", "reconciliation.csv"):
+        if (settings.reports_dir / rep).exists():
+            shutil.copyfile(settings.reports_dir / rep, month_dir / rep)
+    # v3 (Q4): phone-readable CSV "option chain at time T" for this month, next to the Parquet files
+    exp = run_export(settings, start=start_d, end=end_d, out_dir=month_dir, make_zip=False,
+                     folder_name="chain_csv")
 
     summary_lines = [
         f"UPDL MONTH BATCH #{batch_no:02d} COMPLETE",
         f"Mahina Window : {iso(start_d)} se {iso(end_d)}",
         f"Parquet Files : {copied_files}",
+        f"CSV Files     : {exp['csv_files']} (chain_csv/: option chain har {DEFAULT_EVERY_MIN} minute, README_EXPORT.txt padho)",
         f"Valid Days    : {val_res.get('valid_trading_days', 0)}",
         f"Saved Folder  : {month_dir}",
+        "Zip ke andar  : store/ (Parquet), chain_csv/ (CSV), health.csv, health_summary.txt, month_summary.txt",
         "Agla pichhla mahina nikalne ke liye chalao:",
         "  python -m updl continue",
     ]
@@ -124,16 +133,16 @@ def _package_month_output(settings: Settings, batch_no: int, start_d: dt.date, e
             if f.is_file():
                 zf.write(f, f.relative_to(out_root).as_posix())
 
-    sdcard_copied = None
-    target_phone = Path(phone_dir) if phone_dir else Path("/sdcard/Download/updl_months")
-    try:
-        if phone_dir or Path("/sdcard/Download").exists():
-            target_phone.mkdir(parents=True, exist_ok=True)
-            shutil.copy2(zip_path, target_phone / zip_path.name)
-            shutil.copy2(month_dir / "month_summary.txt", target_phone / f"{tag}_summary.txt")
-            sdcard_copied = str(target_phone / zip_path.name)
-    except OSError:
-        sdcard_copied = None
+    # v3: copyfile (not copy2: Android shared storage can refuse the metadata copy) and a Hinglish hint
+    # to run `termux-setup-storage` when the phone folder is not writable (it used to fail silently).
+    sdcard_copied = copy_to_phone(zip_path, str(phone_dir) if phone_dir else None)
+    if sdcard_copied:
+        summary_copy = month_dir / "month_summary.txt"
+        tmp_name = Path(sdcard_copied).with_suffix(".txt")
+        try:
+            shutil.copyfile(summary_copy, tmp_name)
+        except OSError:
+            pass
 
     return {
         "batch_no": batch_no,
@@ -183,6 +192,22 @@ def run_monthly_continue(settings: Settings, client: HttpClient, calendar: Optio
 
     settings.set_param("TEST_START", iso(start_d))
     settings.set_param("TEST_END", iso(end_d))
+    if batch_no > 1:
+        # an older month is already settled: the "re-fetch the last day next run" safeguard only costs calls
+        settings.refetch_last_day = False
+
+    if not settings.dry_run:
+        try:
+            check_probe_fresh(settings, secrets=secrets)
+        except ProbeMissing as err:
+            if "token" in (err.message or "").lower():
+                raise
+            # v3: the probe report is valid for 7 days; a month-by-month run spans weeks. Re-run it here
+            # (at most 40 calls) instead of stopping the owner with exit 30.
+            print("[Termux Continue] probe_report purana ya missing hai. Pehle probe chala raha hoon (max 40 calls)...")
+            saved_budget = client.budget
+            run_probe(settings, client, calendar=calendar)
+            client.budget = saved_budget          # the probe set its own 40-call budget; restore the caller's
 
     if settings.dry_run:
         res = run_download(settings, client, calendar, run_id=run_id, log=log,

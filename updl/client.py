@@ -31,6 +31,9 @@ ALLOWED_PATH_TEMPLATES = (
     "/v2/expired-instruments/future/contract",
     "/v2/expired-instruments/historical-candle/{expired_instrument_key}/{interval}/{to_date}/{from_date}",
     "/v2/instruments/search",
+    # v3: live option chain for the Recorder (read-only GET, Analytics Token supported). Added on purpose:
+    # Upstox has no historical chain endpoint, so bid/ask/IV/greeks can only be saved live. See DECISIONS.md.
+    "/v2/option/chain",
 )
 MASTER_URLS = {
     "NSE": "https://assets.upstox.com/market-quote/instruments/exchange/NSE.json.gz",

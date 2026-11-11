@@ -2,6 +2,7 @@
 
 Commands:
   probe | plan | download | continue | month | compact | validate | derive | report | handoff | verify | ingest
+  export (phone CSV zip, option chain at time T) | record (live option-chain Recorder)
 """
 from __future__ import annotations
 
@@ -14,12 +15,14 @@ from .client import HttpClient, RateLimiter
 from .config import load_settings
 from .derive import run_derive
 from .errors import (EXIT_OK, EXIT_OTHER_ERROR, EXIT_SOME_NOT_OK, UpdlError)
+from .export import DEFAULT_EVERY_MIN, run_export
 from .handoff import run_handoff, run_report, run_verify
 from .ingest import run_ingest
 from .messages import DATA_RIGHTS_WARNING, RIGHTS_NOT_ALLOWED
 from .monthly import run_monthly_continue
 from .plan import run_download, run_plan_command
 from .probe import run_probe
+from .recorder import run_record
 from .runlog import RunLog
 from .sessions import load_calendar
 from .store import compact
@@ -27,7 +30,7 @@ from .tokens import load_tokens
 from .validate import run_validate
 
 COMMANDS = ("probe", "plan", "download", "continue", "month", "compact",
-            "validate", "derive", "report", "handoff", "verify", "ingest")
+            "validate", "derive", "report", "handoff", "verify", "ingest", "export", "record")
 
 
 def build_parser() -> argparse.ArgumentParser:
@@ -56,6 +59,11 @@ def build_parser() -> argparse.ArgumentParser:
     p.add_argument("--phone-dir", default=None, help="Optional phone output folder for monthly zip packages")
     p.add_argument("--with-warmup", action="store_true", help="Include warmup window during 1-month continue mode")
     p.add_argument("--synthetic-fixture", action="store_true", help="Label output as SYNTHETIC_FIXTURE")
+    p.add_argument("--every", type=int, default=None,
+                   help="export: minutes between chain snapshots (default 15); record: seconds between snapshots (default 60)")
+    p.add_argument("--underlyings", default=None, help="record: comma-separated, e.g. NIFTY,SENSEX (default all)")
+    p.add_argument("--until", default=None, help="record: stop at HH:MM IST (default: session close)")
+    p.add_argument("--once", action="store_true", help="record: take one snapshot now and stop")
     return p
 
 
@@ -126,6 +134,22 @@ def main(argv: Optional[list] = None, transport=None, environ=None, sleep=None) 
 
         if cmd == "download":
             run_download(settings, client, calendar=calendar, run_id=rlog.run_id, log=rlog, secrets=secrets)
+            return EXIT_OK
+
+        if cmd == "record":
+            if settings.data_rights == "UNVERIFIED":
+                print(DATA_RIGHTS_WARNING)
+            if settings.dry_run:
+                print("record --dry-run: Recorder network ke bina kuch nahi kar sakta. Kuch nahi kiya.")
+                return EXIT_OK
+            unds = [u.strip() for u in args.underlyings.split(",")] if args.underlyings else None
+            run_record(settings, client, calendar=calendar, underlyings=unds,
+                       every_sec=args.every or 60, until=args.until, once=args.once, log=rlog)
+            return EXIT_OK
+
+        if cmd == "export":
+            run_export(settings, calendar=calendar, every_min=args.every or DEFAULT_EVERY_MIN,
+                       phone_dir=args.phone_dir)
             return EXIT_OK
 
         if settings.data_rights == "UNVERIFIED":

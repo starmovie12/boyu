@@ -307,3 +307,165 @@ class TestReferenceTables(unittest.TestCase):
         self.assertEqual(_settlement_time_ist(dt.date(2026, 7, 28), iv_cfg).strftime("%H:%M"), "15:30")
         self.assertEqual(_settlement_time_ist(dt.date(2026, 11, 17), iv_cfg).strftime("%H:%M"), "15:35")
         self.assertEqual(_settlement_time_ist(dt.date(2026, 12, 8), iv_cfg).strftime("%H:%M"), "15:30")
+
+
+class TestExportAndMonthZip(unittest.TestCase):
+    def test_month_zip_contains_parquet_csv_chain_and_readme(self):
+        import zipfile
+        from updl.monthly import run_monthly_continue
+        cal = load_calendar(REF_DIR)
+        with tempfile.TemporaryDirectory() as tmp:
+            settings = load_settings(MANIFEST_PATH, workdir=tmp, items="D12,D01,D03,D07,D06")
+            settings.instruments = {k: v for k, v in settings.instruments.items() if k in ("NIFTY", "INDIAVIX")}
+            cli = _client(_build_fixture_transport("A"))
+            # no probe on purpose: continue runs it itself when probe_report.json is missing (v3)
+            patcher = mock.patch("updl.monthly.run_derive", lambda *a, **k: {"files_written": 0})
+            patcher.start()
+            self.addCleanup(patcher.stop)
+            pkg = run_monthly_continue(settings, cli, calendar=cal, today_override="2026-11-11",
+                                       phone_dir=str(Path(tmp) / "phone"))
+            self.assertTrue(settings.probe_json.exists())
+            with zipfile.ZipFile(pkg["zip_path"]) as zf:
+                names = zf.namelist()
+            self.assertTrue(any("/store/" in n and n.endswith(".parquet") for n in names))
+            self.assertTrue(any("/chain_csv/NIFTY/chain_NIFTY_" in n for n in names))
+            self.assertTrue(any("/chain_csv/NIFTY/summary_NIFTY_" in n for n in names))
+            self.assertTrue(any(n.endswith("chain_csv/README_EXPORT.txt") for n in names))
+            self.assertTrue(any(n.endswith("month_summary.txt") for n in names))
+            for n in names:   # short names: the secret scan flags 40+ char runs
+                for part in n.split("/"):
+                    self.assertLess(len(part), 40, n)
+
+    def test_export_command_writes_readable_chain_csv(self):
+        import csv as _csv
+        import zipfile
+        from updl.export import run_export
+        from updl.store import part_path, write_parquet, parse_candles, rows_to_frame
+        from tests.test_updl import _make_full_day_candles
+        cal = load_calendar(REF_DIR)
+        d = dt.date(2026, 5, 11)
+        with tempfile.TemporaryDirectory() as tmp:
+            s = load_settings(MANIFEST_PATH, workdir=tmp, test_start="2026-05-11", test_end="2026-05-11")
+            r_s, _ = parse_candles({"data": {"candles": _make_full_day_candles(d, "09:15", "15:30")}})
+            write_parquet(rows_to_frame(r_s, {"table": "spot_1m", "instrument_key": "NSE_INDEX|Nifty 50",
+                                              "underlying": "NIFTY", "option_type": "SPOT"}, cal, "r1", "0" * 64),
+                          part_path(s.store_dir, "dev", "spot_1m", "NIFTY", d))
+            write_parquet(_opt_frame([("K1", 25000.0, "CE", "09:20", 120.0, 5, 1000),
+                                      ("K2", 25000.0, "PE", "09:40", 110.0, 5, 1500)], cal),
+                          part_path(s.store_dir, "dev", "opt_1m", "NIFTY", d))
+            res = run_export(s, cal, every_min=15, phone_dir=str(Path(tmp) / "phone"))
+            self.assertEqual(res["days"], 1)
+            self.assertTrue(Path(res["phone_path"]).exists())
+            with zipfile.ZipFile(res["zip_path"]) as zf:
+                rows = list(_csv.DictReader(zf.read("NIFTY/chain_NIFTY_2026-05-11.csv").decode().splitlines()))
+                summ = list(_csv.DictReader(zf.read("NIFTY/summary_NIFTY_2026-05-11.csv").decode().splitlines()))
+                self.assertIn("README_EXPORT.txt", zf.namelist())
+            by_time = {r["time"]: r for r in rows}
+            self.assertEqual(by_time["09:30"]["ce_close"], "120.0")
+            self.assertEqual(by_time["09:30"]["ce_is_filled"], "True")
+            self.assertEqual(by_time["09:30"]["pe_close"], "")          # PE has not traded yet: empty, not 0
+            self.assertEqual(by_time["09:45"]["pe_oi"], "1500.0")
+            s_by = {r["time"]: r for r in summ}
+            self.assertAlmostEqual(float(s_by["09:45"]["pcr"]), 1.5)
+            self.assertEqual(s_by["09:30"]["pcr"], "")
+
+    def test_phone_copy_prints_storage_hint_when_not_writable(self):
+        import io
+        from contextlib import redirect_stdout
+        from updl.export import copy_to_phone
+        with tempfile.TemporaryDirectory() as tmp:
+            f = Path(tmp) / "a.zip"
+            f.write_bytes(b"x")
+            blocker = Path(tmp) / "blocker"
+            blocker.write_text("i am a file, not a folder")
+            buf = io.StringIO()
+            with redirect_stdout(buf):
+                self.assertIsNone(copy_to_phone(f, str(blocker / "sub")))
+            self.assertIn("termux-setup-storage", buf.getvalue())
+
+
+class TestRecorder(unittest.TestCase):
+    def test_option_chain_path_is_allowlisted_and_nothing_else_new(self):
+        from updl.client import ALLOWED_PATH_TEMPLATES, path_allowed
+        self.assertTrue(path_allowed("/v2/option/chain"))
+        self.assertFalse(path_allowed("/v2/option/contract"))
+        self.assertEqual(len(ALLOWED_PATH_TEMPLATES), 7)
+
+    def test_recorder_writes_bid_ask_greeks_and_resumes_by_appending(self):
+        import csv as _csv
+        import json as _json
+        from updl.client import RawResponse, path_allowed
+        from updl.recorder import run_record
+        from updl.timeutil import IST
+        from updl.tokens import Tokens
+        base = _build_fixture_transport("A")
+        chain = {"status": "success", "data": [{
+            "expiry": "2026-11-24", "pcr": 1.1, "strike_price": 25000.0, "underlying_key": "NSE_INDEX|Nifty 50",
+            "underlying_spot_price": 25012.5,
+            "call_options": {"instrument_key": "NSE_FO|90002",
+                             "market_data": {"ltp": 120.5, "volume": 1000, "oi": 5000, "close_price": 118.0,
+                                             "bid_price": 120.0, "bid_qty": 650, "ask_price": 121.0,
+                                             "ask_qty": 325, "prev_oi": 4800},
+                             "option_greeks": {"vega": 10.1, "theta": -5.2, "gamma": 0.001, "delta": 0.52,
+                                               "iv": 13.4, "pop": 48.0}},
+            "put_options": {"instrument_key": "NSE_FO|90003",
+                            "market_data": {"ltp": 99.0, "volume": 800, "oi": 6000, "close_price": 101.0,
+                                            "bid_price": 98.5, "bid_qty": 65, "ask_price": 99.5,
+                                            "ask_qty": 130, "prev_oi": 6100},
+                            "option_greeks": {"vega": 10.0, "theta": -5.0, "gamma": 0.001, "delta": -0.48,
+                                              "iv": 14.1, "pop": 52.0}}}]}
+
+        class T:
+            def __init__(self):
+                self.requests = []
+
+            def get(self, url, headers=None, timeout=None):
+                self.requests.append(url)
+                if "/v2/option/chain" in url:
+                    return RawResponse(200, {}, _json.dumps(chain).encode())
+                return base.get(url, headers, timeout)
+
+        cal = load_calendar(REF_DIR)
+        clock = [dt.datetime(2026, 11, 12, 10, 0, tzinfo=IST)]
+
+        def sleep(sec):
+            clock[0] = clock[0] + dt.timedelta(seconds=sec)
+
+        with tempfile.TemporaryDirectory() as tmp:
+            settings = load_settings(MANIFEST_PATH, workdir=tmp)
+            tr = T()
+            cli = _client(tr, Tokens(analytics="dummy_value"))
+            res = run_record(settings, cli, calendar=cal, underlyings=["NIFTY"], every_sec=60,
+                             max_snapshots=3, now_fn=lambda: clock[0], sleep=sleep)
+            self.assertEqual(res["snapshots"], 3)
+            day_file = Path(tmp) / "recorder" / "NIFTY" / "2026-11-12.csv"
+            rows = list(_csv.DictReader(day_file.read_text(encoding="utf-8").splitlines()))
+            self.assertEqual(len(rows), 6)
+            self.assertEqual(rows[0]["bid"], "120.0")
+            self.assertEqual(rows[0]["ask"], "121.0")
+            self.assertEqual(rows[1]["iv"], "14.1")
+            self.assertEqual(rows[0]["expiry_date"], "2026-11-24")
+            self.assertEqual(rows[0]["exchange_ts"], "")
+            # a second run (after a kill) appends to the same file, header written once
+            run_record(settings, cli, calendar=cal, underlyings=["NIFTY"], max_snapshots=1,
+                       now_fn=lambda: clock[0], sleep=sleep)
+            text = day_file.read_text(encoding="utf-8")
+            self.assertEqual(text.count("local_ts,"), 1)
+            self.assertEqual(len(text.strip().splitlines()), 1 + 8)
+            for u in tr.requests:
+                bare = u.split("https://api.upstox.com", 1)[-1].split("?", 1)[0]
+                self.assertTrue(path_allowed(bare) or u.startswith("https://assets.upstox.com"), u)
+            # after the session close it stops by itself
+            clock[0] = dt.datetime(2026, 11, 12, 15, 45, tzinfo=IST)
+            self.assertEqual(run_record(settings, cli, calendar=cal, underlyings=["NIFTY"],
+                                        now_fn=lambda: clock[0], sleep=sleep)["snapshots"], 0)
+
+    def test_recorder_refuses_holidays(self):
+        from updl.recorder import run_record
+        from updl.timeutil import IST
+        cal = load_calendar(REF_DIR)
+        with tempfile.TemporaryDirectory() as tmp:
+            settings = load_settings(MANIFEST_PATH, workdir=tmp)
+            res = run_record(settings, _client(_build_fixture_transport("A")), calendar=cal,
+                             now_fn=lambda: dt.datetime(2026, 11, 24, 10, 0, tzinfo=IST), sleep=lambda s: None)
+            self.assertEqual(res["reason"], "NOT_A_TRADING_DAY")
