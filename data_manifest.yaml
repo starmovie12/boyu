@@ -1,0 +1,44 @@
+# data_manifest.yaml  v2  (11 Nov 2026 IST)  -- single source of truth; PROMPT_02 embeds this file byte for byte.
+# Tags for every fact live in DATA_REQUIREMENTS.md (FACT LEDGER).
+manifest_version: 2
+params:
+  TEST_START: "2026-05-11"
+  TEST_END: "2026-11-09"              # last fully completed trading day (10 Nov = holiday). Extend with --test-end, but only after 18:00 IST.
+  HOLDOUT_START: "2026-10-05"         # last 20% of the planned span = 25 of 126 trading days (counted); sealed. Recompute if TEST_START/TEST_END change.
+  WARMUP_SPOT_1M_CALENDAR_DAYS: 45    # >= 20 trading days (RV20, ADX carry-over, EMA/ATR/RSI/BB/Keltner)
+  WARMUP_DAILY_CALENDAR_DAYS: 400     # was a fixed date; now relative to TEST_START so extending the window never starves IVP / VIX 250-day median (needs >= 252 trading days)
+  WARMUP_OPTION_TRADING_DAYS_BY_INDEX: {NIFTY: 35, SENSEX: 35, BANKNIFTY: 7}   # NIFTY/SENSEX 35 = 7 weekly cycles so "same DTE bucket" baseline has 5 matches; BANKNIFTY monthly cannot (see volume baseline mode)
+  VOLUME_BASELINE_MODE: "BOTH"        # SAME_DTE_BUCKET | ANY_DTE | BOTH (both columns written, owner decides later)
+  STRIKE_MARGIN_STEPS: 6              # minimum margin each side of the day range, in strike steps
+  STRIKE_DELTA_MARGIN_K: 0.6          # extra margin = K x spot x (VIX_day_high/100) x sqrt(calendar_DTE/365); band margin = max(STRIKE_MARGIN_STEPS x step, that). Keeps delta 0.30..0.70 strikes on long-dated (monthly) contracts
+  WIDE_CHAIN_STEPS: 20                # P1 only (OI walls, Max Pain, GEX, PCR); band = [day_low - 20 steps, day_high + 20 steps]
+  RATE_CALLS_PER_MIN: 30              # conservative: Upstox docs show conflicting limits (25/250/1000 vs 50/500/2000 per s/min/30min); probe measures, owner may raise
+  RATE_MAX_PER_30MIN: 900             # 90% of the lower documented figure (1000)
+  DATA_RIGHTS: "UNVERIFIED"           # OK | MINIMAL | NOT_ALLOWED | UNVERIFIED
+instruments:
+  NIFTY:     {spot_key: "NSE_INDEX|Nifty 50", exchange: NSE, fo_segment: NSE_FO, expiry: weekly_tuesday, strike_step_default: 50}
+  BANKNIFTY: {spot_key: "RESOLVE_FROM_MASTER:NSE_INDEX:Nifty Bank", exchange: NSE, fo_segment: NSE_FO, expiry: monthly_last_tuesday, strike_step_default: 100}
+  SENSEX:    {spot_key: "RESOLVE_FROM_MASTER:BSE_INDEX:SENSEX", exchange: BSE, fo_segment: BSE_FO, expiry: weekly_thursday, strike_step_default: 100}
+  INDIAVIX:  {spot_key: "NSE_INDEX|India VIX", exchange: NSE}
+# Download order (dependencies): D12 -> D01..D04 -> D09 -> D07 -> D05 -> D06 -> D08 -> D10 -> D11.  D06/D08 need D01 (day high/low) and D03 (VIX) first.
+items:
+  - {id: D01, item: spot candles 1m, instruments: [NIFTY, BANKNIFTY, SENSEX], endpoint: v3_historical, unit: minutes, interval: 1, window: [warmup_1m, test], fields: [ts_open,o,h,l,c,v,oi], priority: P0, plan: [A,B,C], est_calls: "3 x ceil((45+183)/28) = 27"}
+  - {id: D02, item: spot candles daily, instruments: [NIFTY, BANKNIFTY, SENSEX], endpoint: v3_historical, unit: days, interval: 1, window: [warmup_daily, test], fields: [ts_open,o,h,l,c,v], priority: P0, plan: [A,B,C], est_calls: 3}
+  - {id: D03, item: India VIX 1m, instruments: [INDIAVIX], endpoint: v3_historical, unit: minutes, interval: 1, window: [warmup_1m, test], fields: [ts_open,o,h,l,c], priority: P0, plan: [A,B,C], est_calls: 9}
+  - {id: D04, item: India VIX daily, instruments: [INDIAVIX], endpoint: v3_historical, unit: days, interval: 1, window: [warmup_daily, test], fields: [ts_open,o,h,l,c], priority: P0, plan: [A,B,C], est_calls: 1}
+  - {id: D05, item: index futures 1m (current + next month), instruments: [NIFTY, BANKNIFTY, SENSEX], endpoint: expired_else_v3, unit: 1minute, window: [warmup_1m, test], fields: [ts_open,o,h,l,c,v,oi], priority: P0, plan: [A,B], b_mode: still_listed_only, est_calls: "about 24 to 250 (cap dependent)"}
+  - {id: D06, item: option contracts 1m P0 band CE+PE, current expiry plus next expiry on expiry days, instruments: [NIFTY, BANKNIFTY, SENSEX], endpoint: expired_else_v3, unit: 1minute, window: [warmup_option, test], fields: [ts_open,o,h,l,c,v,oi], priority: P0, plan: [A,B], b_mode: still_listed_only, est_calls: "about 5000 to 6500 (28-day cap) up to 22000 to 28000 (1-day cap); exact number printed by the plan command"}
+  - {id: D07, item: expiry lists and contract lists (expired), instruments: [NIFTY, BANKNIFTY, SENSEX], endpoint: expired_lists, window: [warmup_option, test], fields: [expiry_date, expired_instrument_key, strike, option_type, trading_symbol], priority: P0, plan: [A], est_calls: "about 130"}
+  - {id: D08, item: wide-chain option contracts 1m (OI walls, Max Pain, GEX, PCR), instruments: [NIFTY, BANKNIFTY, SENSEX], endpoint: expired_else_v3, unit: 1minute, window: [test], fields: [ts_open,c,v,oi], priority: P1, plan: [A], est_calls: "about 2.4x D06"}
+  - {id: D09, item: cash stocks 1m, heavyweights + BankNifty banks, endpoint: v3_historical, unit: minutes, interval: 1, window: [warmup_1m, test], fields: [ts_open,o,h,l,c,v], priority: P0, plan: [A,B,C], est_calls: "N_stocks x 9 (about 25 x 9 = 225)"}
+  - {id: D10, item: cash stocks 1m, Nifty50 + Sensex constituents (list undecided; skipped until stocks.csv has them), endpoint: v3_historical, unit: minutes, interval: 1, window: [test], fields: [ts_open,o,h,l,c,v], priority: P1, plan: [A,B,C], est_calls: "N_new_stocks x 7 (about 45 x 7 = 315)"}
+  - {id: D11, item: global indicators and GIFT Nifty 1m (USD INR, Brent, WTI, GIFT NIFTY), endpoint: v3_historical, unit: minutes, interval: 1, window: [test], fields: [ts_open,o,h,l,c], priority: P2, plan: [A,B,C], est_calls: "4 x 7 = 28"}
+  - {id: D12, item: instrument master snapshots (today; NOT point in time), source: assets.upstox.com NSE.json.gz BSE.json.gz global.json.gz, priority: P0, plan: [A,B,C], est_calls: 0}
+  - {id: D13, item: NSE F&O UDiFF common bhavcopy daily (all strikes OHLC, volume, OI); used by the validator to RECONCILE candles (close, volume, OI), source: owner-supplied external/bhavcopy/, priority: P1, plan: [A,B,C], note: "P0 only under Plan C"}
+  - {id: D14, item: NSE participant-wise F&O OI daily, source: owner-supplied external/participant_oi.csv (exact NSE file name UNVERIFIED), priority: P1, plan: [A,B,C], note: usable from NEXT session only}
+  - {id: D15, item: session and holiday calendar (dated), source: reference/sessions.yaml + holidays.yaml created from the prompt, priority: P0, plan: [A,B,C]}
+  - {id: D16, item: contract specs by date (lot, tick, freeze, strike step), source: reference/specs.yaml + master snapshot + exchange circulars, priority: P0, plan: [A,B,C]}
+  - {id: D17, item: dated charge table (NSE and BSE options), source: reference/charges.yaml, priority: P0, plan: [A,B,C]}
+  - {id: D18, item: event calendar rebuilt from official sources, minute stamps, source: owner-supplied external/events.csv, priority: P0, plan: [A,B,C]}
+  - {id: D19, item: index constituents and weights by date, source: owner-supplied external/constituents.csv (NSE Indices, BSE), priority: P1, plan: [A,B,C]}
+  - {id: D20, item: India 10-year yield daily, source: UNVERIFIED (not seen in Upstox global list), priority: P2, plan: [A,B,C]}
