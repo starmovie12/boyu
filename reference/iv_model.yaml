@@ -1,0 +1,16 @@
+# iv_model.yaml (table_version 2) -- tag ASSUMPTION: the owner has not fixed the model.
+# These are computed values, NOT broker values.
+# Black-76 is used undiscounted (price = F*N(d1) - K*N(d2)), so put-call parity F = K + C - P is exact.
+# risk_free_rate is only used by the cost-of-carry fallback forward F = S*exp((r - q)*T).
+table_version: 2
+tag: ASSUMPTION
+model: black76
+forward_source: PARITY_THEN_COST_OF_CARRY
+risk_free_rate: 0.065
+dividend_yield: 0.0
+minutes_per_year: 525600           # calendar-time convention (ASSUMPTION)
+min_T_minutes: 1
+settlement:
+  - {from: null,         to: "2026-07-31", time: "15:30"}
+  - {from: "2026-08-03", to: null,         time: "15:40"}
+iv_bounds: [0.0001, 5.0]
