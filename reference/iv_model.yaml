@@ -10,7 +10,13 @@ risk_free_rate: 0.065
 dividend_yield: 0.0
 minutes_per_year: 525600           # calendar-time convention (ASSUMPTION)
 min_T_minutes: 1
+# settlement = the time the expiring contract's settlement value is fixed (NOT the trading close).
+# v3 (SEBI circulars 16 Jan 2026 and 15 Oct 2026): before 3 Aug 2026 the index value of the last 30 minutes
+# (15:00-15:30); 3 Aug - 6 Dec 2026 the index close from the cash closing auction (CAS matching 15:30-15:35);
+# from 7 Dec 2026 constituent VWAP of the last 30 minutes of continuous trading (ends 15:30).
+# v2 used 15:40 (the F&O trading close), which overstated time-to-expiry on expiry days.
 settlement:
-  - {from: null,         to: "2026-07-31", time: "15:30"}
-  - {from: "2026-08-03", to: null,         time: "15:40"}
+  - {from: null,         to: "2026-07-31", time: "15:30", tag: SOURCE}
+  - {from: "2026-08-03", to: "2026-12-06", time: "15:35", tag: SOURCE, note: "CAS order matching 15:30-15:35"}
+  - {from: "2026-12-07", to: null,         time: "15:30", tag: SOURCE}
 iv_bounds: [0.0001, 5.0]

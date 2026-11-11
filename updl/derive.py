@@ -28,6 +28,7 @@ import pandas as pd
 from scipy.optimize import brentq
 from scipy.stats import norm
 
+from .chain import asof_chain, chain_metrics, spot_asof
 from .config import Settings, load_yaml
 from .selector import strike_step
 from .sessions import Calendar, load_calendar
@@ -154,7 +155,9 @@ def derive_MultiMinute_bars(df_1m: pd.DataFrame, minutes: int) -> pd.DataFrame:
 
 
 def _settlement_time_ist(expiry_date: dt.date, iv_cfg: dict) -> dt.datetime:
-    hhmm = "15:40" if expiry_date >= dt.date(2026, 8, 3) else "15:30"
+    """Time at which the expiring contract's settlement value is fixed (from iv_model.yaml `settlement`).
+    v3: no hard-coded date here any more; 15:30 is only the fallback when the table has no matching row."""
+    hhmm = "15:30"
     for r in iv_cfg.get("settlement", []):
         f_d = to_date(r["from"]) if r.get("from") else None
         t_d = to_date(r["to"]) if r.get("to") else None
@@ -233,7 +236,9 @@ def run_derive(settings: Settings, calendar: Optional[Calendar] = None) -> dict:
     calendar = calendar or load_calendar(settings.reference_dir)
     iv_cfg = load_yaml(settings.reference_dir / "iv_model.yaml")
     specs_cfg = load_yaml(settings.reference_dir / "specs.yaml")
-    lot_map = {r["underlying"]: int(r["value"]) for r in specs_cfg.get("lot_size", []) if r.get("value")}
+    # v3: lot sizes are no longer needed here. Upstox reports OI in units (quantity), not lots (staff reply,
+    # community.upstox.com/t/18087, 2026-10-19), so GEX must not multiply OI by the lot size again.
+    _ = specs_cfg
     r_rate = float(iv_cfg.get("risk_free_rate", 0.065))
     q_yield = float(iv_cfg.get("dividend_yield", 0.0))
     mins_per_yr = float(iv_cfg.get("minutes_per_year", 525600.0))
@@ -250,7 +255,6 @@ def run_derive(settings: Settings, calendar: Optional[Calendar] = None) -> dict:
 
     for und in settings.instrument_names():
         default_step = float(settings.instruments[und].get("strike_step_default", 50.0))
-        lot_size = float(lot_map.get(und, 65))
 
         # Load daily spot for RV20
         s1d_parts = list_parts(settings.store_dir, "dev", "spot_1d", und) + \
@@ -320,8 +324,14 @@ def run_derive(settings: Settings, calendar: Optional[Calendar] = None) -> dict:
             odf["ts_open"] = pd.to_datetime(odf["ts_open"]).dt.tz_convert(IST)
             odf["ts_close"] = pd.to_datetime(odf["ts_close"]).dt.tz_convert(IST)
 
-            spot_by_ts = dict(zip(sdf["ts_open"], sdf["c"].astype(float)))
             step = strike_step(odf["strike"].dropna().unique(), default_step)
+            # v3 (no look-ahead): the spot used for minute T is the last spot candle closed at or before T.
+            # Before, a missing spot minute fell back to the day's LAST close (a value from the future).
+            minute_ts = sorted(set(odf["ts_open"]))
+            spot_known = dict(zip(minute_ts, spot_asof(sdf, [t + dt.timedelta(minutes=1) for t in minute_ts])))
+            # Chain "as of" each minute close: OI and prices carried from older candles are flagged, never 0.
+            snap_all = asof_chain(odf, [t + dt.timedelta(minutes=1) for t in minute_ts])
+            snap_groups = {k: g for k, g in snap_all.groupby(["snapshot_ts", "expiry_date"], sort=False)}
 
             chain_rows = []
             iv_rows = []
@@ -331,7 +341,7 @@ def run_derive(settings: Settings, calendar: Optional[Calendar] = None) -> dict:
             for (ts_o, exp_raw), mgrp in odf.groupby(["ts_open", "expiry_date"], sort=True):
                 exp_d = to_date(exp_raw)
                 ts_c = ts_o + dt.timedelta(minutes=1)
-                spot_c = spot_by_ts.get(ts_o, float(sdf["c"].iloc[-1]))
+                spot_c = spot_known.get(ts_o, float("nan"))
                 settle_dt = _settlement_time_ist(exp_d, iv_cfg)
                 t_mins = max(1.0, (settle_dt - ts_c).total_seconds() / 60.0)
                 T_yrs = t_mins / mins_per_yr
@@ -359,13 +369,13 @@ def run_derive(settings: Settings, calendar: Optional[Calendar] = None) -> dict:
                                 F_val = k_val + float(ce_r["c"]) - float(pe_r["c"])
                 if F_val is not None and F_val > 0:
                     fwd_source = "PARITY"
-                else:
+                elif not math.isnan(spot_c):
                     F_val = spot_c * math.exp((r_rate - q_yield) * T_yrs)
                     fwd_source = "COST_OF_CARRY"
+                else:
+                    F_val = float("nan")
+                    fwd_source = "NONE_NO_SPOT_YET"
 
-                tot_ce_oi, tot_pe_oi = 0.0, 0.0
-                best_call_wall_k, best_call_wall_oi = np.nan, -1.0
-                best_put_wall_k, best_put_wall_oi = np.nan, -1.0
                 gex_total = 0.0
 
                 for k_val, pair in sorted(by_k.items()):
@@ -373,19 +383,13 @@ def run_derive(settings: Settings, calendar: Optional[Calendar] = None) -> dict:
                     pe_r = pair.get("PE")
                     ce_c = float(ce_r["c"]) if ce_r is not None else np.nan
                     pe_c = float(pe_r["c"]) if pe_r is not None else np.nan
-                    ce_v = int(ce_r["v"]) if (ce_r is not None and pd.notna(ce_r["v"])) else 0
-                    pe_v = int(pe_r["v"]) if (pe_r is not None and pd.notna(pe_r["v"])) else 0
-                    ce_oi = int(ce_r["oi"]) if (ce_r is not None and pd.notna(ce_r["oi"])) else 0
-                    pe_oi = int(pe_r["oi"]) if (pe_r is not None and pd.notna(pe_r["oi"])) else 0
+                    # v3 (Rule 4): a contract without a candle in this minute keeps null volume / OI, never 0
+                    ce_v = float(ce_r["v"]) if (ce_r is not None and pd.notna(ce_r["v"])) else np.nan
+                    pe_v = float(pe_r["v"]) if (pe_r is not None and pd.notna(pe_r["v"])) else np.nan
+                    ce_oi = float(ce_r["oi"]) if (ce_r is not None and pd.notna(ce_r["oi"])) else np.nan
+                    pe_oi = float(pe_r["oi"]) if (pe_r is not None and pd.notna(pe_r["oi"])) else np.nan
                     ce_stale = bool(ce_r["is_stale"]) if ce_r is not None else True
                     pe_stale = bool(pe_r["is_stale"]) if pe_r is not None else True
-
-                    tot_ce_oi += ce_oi
-                    tot_pe_oi += pe_oi
-                    if k_val >= spot_c and ce_oi > best_call_wall_oi:
-                        best_call_wall_oi, best_call_wall_k = ce_oi, k_val
-                    if k_val <= spot_c and pe_oi > best_put_wall_oi:
-                        best_put_wall_oi, best_put_wall_k = pe_oi, k_val
 
                     chain_rows.append({
                         "underlying": und, "trading_date": d, "expiry_date": exp_d,
@@ -395,18 +399,22 @@ def run_derive(settings: Settings, calendar: Optional[Calendar] = None) -> dict:
                         "available_from_ts": ts_c,
                     })
 
-                    m_bkt = int(round((k_val - spot_c) / step))
+                    if math.isnan(spot_c):
+                        m_bkt = None
+                    else:
+                        m_bkt = int(round((k_val - spot_c) / step))
                     for ot, r_opt in (("CE", ce_r), ("PE", pe_r)):
                         if r_opt is None:
                             continue
                         opt_c = float(r_opt["c"])
-                        opt_v = int(r_opt["v"]) if pd.notna(r_opt["v"]) else 0
-                        opt_oi = int(r_opt["oi"]) if pd.notna(r_opt["oi"]) else 0
+                        opt_v = float(r_opt["v"]) if pd.notna(r_opt["v"]) else np.nan
+                        opt_oi = float(r_opt["oi"]) if pd.notna(r_opt["oi"]) else np.nan
                         opt_stale = bool(r_opt["is_stale"])
                         iv_res = solve_black76_iv(opt_c, F_val, k_val, T_yrs, ot, is_stale=opt_stale, bounds=iv_bounds)
-                        if pd.notna(iv_res["gamma_DERIVED"]):
+                        if pd.notna(iv_res["gamma_DERIVED"]) and not math.isnan(opt_oi) and not math.isnan(spot_c):
                             sign = 1.0 if ot == "CE" else -1.0
-                            gex_total += sign * float(iv_res["gamma_DERIVED"]) * opt_oi * lot_size * (spot_c ** 2) * 0.01
+                            # OI is already in units (quantity): no lot-size factor (v3 fix)
+                            gex_total += sign * float(iv_res["gamma_DERIVED"]) * opt_oi * (spot_c ** 2) * 0.01
 
                         # Volume baselines (Section 9.6): match by (hhmm, ot, m_bkt), NEVER by strike name!
                         hist_entries = vol_history.get((hhmm, ot, m_bkt), [])
@@ -430,12 +438,13 @@ def run_derive(settings: Settings, calendar: Optional[Calendar] = None) -> dict:
                             vb_same = np.nan
                             st_same = "INSUFFICIENT_HISTORY"
 
-                        day_vol_records.append(((hhmm, ot, m_bkt), (d, dte_bkt, opt_v)))
+                        if m_bkt is not None and not math.isnan(opt_v):
+                            day_vol_records.append(((hhmm, ot, m_bkt), (d, dte_bkt, opt_v)))
 
                         # Fill assumptions (Section 9.7)
                         half_sp = max(tick_sz, 0.005 * opt_c)
                         mod_ask = opt_c + half_sp
-                        fillable = (opt_v > 0) and (not opt_stale)
+                        fillable = bool(not math.isnan(opt_v) and opt_v > 0 and not opt_stale)
 
                         iv_rows.append({
                             "instrument_key": r_opt["instrument_key"],
@@ -460,13 +469,22 @@ def run_derive(settings: Settings, calendar: Optional[Calendar] = None) -> dict:
                             "available_from_ts": ts_c,
                         })
 
-                pcr_val = (tot_pe_oi / tot_ce_oi) if tot_ce_oi > 0 else np.nan
+                snap = snap_groups.get((pd.Timestamp(ts_c), exp_raw))
+                if snap is None:
+                    snap = snap_all.iloc[0:0]
+                met = chain_metrics(snap, None if math.isnan(spot_c) else spot_c) if not snap.empty else {
+                    "pcr": np.nan, "call_oi_wall": np.nan, "put_oi_wall": np.nan, "max_pain": np.nan,
+                    "n_strikes": 0, "n_oi_known": 0, "n_oi_carried": 0}
                 minute_summary_rows.append({
                     "underlying": und, "trading_date": d, "expiry_date": exp_d,
                     "ts_open": ts_o, "ts_close": ts_c,
-                    "pcr_DERIVED": pcr_val,
-                    "call_oi_wall_DERIVED": best_call_wall_k,
-                    "put_oi_wall_DERIVED": best_put_wall_k,
+                    "pcr_DERIVED": met["pcr"],
+                    "call_oi_wall_DERIVED": met["call_oi_wall"],
+                    "put_oi_wall_DERIVED": met["put_oi_wall"],
+                    "max_pain_DERIVED": met["max_pain"],
+                    "n_strikes_DERIVED": met["n_strikes"],
+                    "n_oi_known_DERIVED": met["n_oi_known"],
+                    "n_oi_carried_DERIVED": met["n_oi_carried"],
                     "gex_proxy_PROXY": gex_total,
                     "available_from_ts": ts_c,
                 })

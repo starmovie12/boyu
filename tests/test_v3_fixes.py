@@ -200,3 +200,101 @@ class TestTokenAndPlanErrors(unittest.TestCase):
             self.assertIn("BLOCKED_TOKEN", settings.probe_txt.read_text(encoding="utf-8"))
             with self.assertRaises(ProbeMissing):
                 check_probe_fresh(settings)
+
+
+def _opt_frame(rows, cal):
+    """rows: (key, strike, side, hhmm, close, vol, oi) for 2026-05-11, expiry 2026-05-12."""
+    import pandas as pd
+    from updl.store import parse_candles, rows_to_frame
+    frames = []
+    for key, strike, side, hhmm, close, vol, oi in rows:
+        ts = f"2026-05-11T{hhmm}:00+05:30"
+        r, _ = parse_candles({"data": {"candles": [[ts, close, close, close, close, vol, oi]]}})
+        frames.append(rows_to_frame(r, {"table": "opt_1m", "instrument_key": key, "underlying": "NIFTY",
+                                        "expiry_date": "2026-05-12", "strike": strike, "option_type": side},
+                                    cal, "r1", "0" * 64))
+    return pd.concat(frames, ignore_index=True)
+
+
+class TestChainAsOf(unittest.TestCase):
+    def test_asof_snapshot_uses_only_closed_candles_and_flags_carried_values(self):
+        import math
+        from updl.chain import asof_chain, chain_metrics
+        from updl.timeutil import IST
+        cal = load_calendar(REF_DIR)
+        odf = _opt_frame([
+            ("K1", 25000.0, "CE", "09:15", 100.0, 10, 1000),
+            ("K1", 25000.0, "CE", "09:16", 101.0, 5, 1100),
+            ("K2", 25000.0, "PE", "09:15", 90.0, 7, 3000),
+            ("K3", 25100.0, "CE", "09:16", 60.0, 4, 500),
+        ], cal)
+        t916 = dt.datetime(2026, 5, 11, 9, 16, tzinfo=IST)
+        t917 = dt.datetime(2026, 5, 11, 9, 17, tzinfo=IST)
+        snap = asof_chain(odf, [t916, t917])
+        s916 = snap[snap["snapshot_ts"] == t916].set_index("strike")
+        s917 = snap[snap["snapshot_ts"] == t917].set_index("strike")
+        # at 09:16 only the 09:15 candles have closed: the 09:16 candle (close 101) is NOT visible yet
+        self.assertEqual(s916.loc[25000.0, "ce_close"], 100.0)
+        self.assertFalse(s916.loc[25000.0, "ce_is_filled"])
+        self.assertTrue(math.isnan(s916.loc[25100.0, "ce_close"]))
+        self.assertTrue(math.isnan(s916.loc[25100.0, "ce_oi"]))
+        # at 09:17 the PE value is carried from 09:15 and says so; nothing is turned into 0
+        self.assertEqual(s917.loc[25000.0, "ce_close"], 101.0)
+        self.assertEqual(s917.loc[25000.0, "pe_oi"], 3000.0)
+        self.assertTrue(s917.loc[25000.0, "pe_is_filled"])
+        self.assertEqual(s917.loc[25000.0, "pe_age_min"], 1.0)
+        self.assertTrue(math.isnan(s917.loc[25000.0, "pe_vol_1m"]))
+        self.assertEqual(s917.loc[25000.0, "ce_vol_cum"], 15.0)
+        met = chain_metrics(s917.reset_index(), spot=25010.0)
+        self.assertAlmostEqual(met["pcr"], 3000.0 / (1100.0 + 500.0))
+        self.assertEqual(met["call_oi_wall"], 25100.0)
+        self.assertEqual(met["put_oi_wall"], 25000.0)
+        self.assertGreaterEqual(met["n_oi_carried"], 1)
+
+    def test_max_pain_small_example(self):
+        import numpy as np
+        from updl.chain import max_pain
+        k = np.array([100.0, 110.0, 120.0])
+        # heavy put OI at 120 and heavy call OI at 100 -> buyers lose most around 110
+        self.assertEqual(max_pain(k, np.array([500.0, 10.0, 10.0]), np.array([10.0, 10.0, 500.0])), 110.0)
+
+    def test_derive_never_uses_a_later_spot_when_a_spot_minute_is_missing(self):
+        import json as _json
+        from updl.derive import run_derive
+        from updl.store import parse_candles, part_path, read_parquet, rows_to_frame, write_parquet
+        from tests.test_updl import _make_full_day_candles
+        cal = load_calendar(REF_DIR)
+        d = dt.date(2026, 5, 11)
+        with tempfile.TemporaryDirectory() as tmp:
+            s = load_settings(MANIFEST_PATH, workdir=tmp, test_start="2026-05-11", test_end="2026-05-11")
+            candles = [c for c in _make_full_day_candles(d, "09:15", "09:30", base_price=25000.0)
+                       if "T09:20:" not in c[0]]
+            candles[-1] = [candles[-1][0], 26000.0, 26002.0, 25998.0, 26000.0, 0, 0]   # a far later close
+            r_s, _ = parse_candles({"data": {"candles": candles}})
+            write_parquet(rows_to_frame(r_s, {"table": "spot_1m", "instrument_key": "NSE_INDEX|Nifty 50",
+                                              "underlying": "NIFTY", "option_type": "SPOT"}, cal, "r1", "0" * 64),
+                          part_path(s.store_dir, "dev", "spot_1m", "NIFTY", d))
+            odf = _opt_frame([("K1", 25000.0, "CE", "09:20", 120.0, 5, 1000),
+                              ("K2", 25000.0, "PE", "09:20", 110.0, 5, 1200)], cal)
+            write_parquet(odf, part_path(s.store_dir, "dev", "opt_1m", "NIFTY", d))
+            run_derive(s, cal)
+            iv = read_parquet(part_path(s.store_dir, "dev", "iv_greeks_1m", "NIFTY", d))
+            self.assertEqual(set(iv["moneyness_bucket"].dropna().astype(int)), {0})
+            met = read_parquet(part_path(s.store_dir, "dev", "chain_metrics_1m", "NIFTY", d))
+            self.assertAlmostEqual(float(met["pcr_DERIVED"].iloc[0]), 1.2)
+            self.assertIn("max_pain_DERIVED", met.columns)
+
+
+class TestReferenceTables(unittest.TestCase):
+    def test_bse_fo_close_and_settlement_times_follow_the_sebi_circulars(self):
+        from updl.config import load_yaml
+        from updl.derive import _settlement_time_ist
+        cal = load_calendar(REF_DIR)
+        self.assertEqual(cal.session_times("bse_index_fo", "2026-07-31")[1], "15:30")
+        self.assertEqual(cal.session_times("bse_index_fo", "2026-08-03")[1], "15:40")
+        self.assertEqual(cal.session_times("nse_index_fo", "2026-12-07")[1], "15:45")
+        self.assertEqual(cal.session_times("bse_index_fo", "2026-12-07")[1], "15:45")
+        iv_cfg = load_yaml(REF_DIR / "iv_model.yaml")
+        self.assertEqual(_settlement_time_ist(dt.date(2026, 7, 28), iv_cfg).strftime("%H:%M"), "15:30")
+        self.assertEqual(_settlement_time_ist(dt.date(2026, 11, 17), iv_cfg).strftime("%H:%M"), "15:35")
+        self.assertEqual(_settlement_time_ist(dt.date(2026, 12, 8), iv_cfg).strftime("%H:%M"), "15:30")

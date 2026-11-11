@@ -2,10 +2,15 @@
 # Today's instrument master may show different numbers for far-dated contracts
 # (e.g. 25 for some 2027 Sensex contracts): the downloader records both and uses THIS table for the window.
 table_version: 2
+# v3: lot sizes change per CONTRACT (dates below are contract expiries). The expired-contract API returns each
+# contract's own lot_size ("Lot sizes are kept as originally traded", Upstox staff 2026-10-23), which is the
+# truth; this table is reference only. updl no longer multiplies OI by a lot size (OI is reported in units).
 lot_size:
-  - {underlying: NIFTY,     from: "2025-04-01", to: null, value: 65, tag: FILE_CLAIM}
-  - {underlying: BANKNIFTY, from: "2025-04-01", to: null, value: 30, tag: FILE_CLAIM}
-  - {underlying: SENSEX,    from: "2025-04-01", to: null, value: 20, tag: FILE_CLAIM}
+  - {underlying: NIFTY,     from: "2025-01-02", to: "2025-12-30", value: 75, basis: contract_expiry, tag: SOURCE_SECONDARY, note: "NSE/FAOP/64625"}
+  - {underlying: NIFTY,     from: "2026-01-06", to: null,         value: 65, basis: contract_expiry, tag: SOURCE_SECONDARY, note: "NSE/FAOP/70616; first weekly 6 Jan 2026"}
+  - {underlying: BANKNIFTY, from: "2025-07-31", to: "2025-12-30", value: 35, basis: contract_expiry, tag: SOURCE_SECONDARY, note: "NSE/FAOP/67372"}
+  - {underlying: BANKNIFTY, from: "2026-01-27", to: null,         value: 30, basis: contract_expiry, tag: SOURCE_SECONDARY, note: "NSE/FAOP/70616; first monthly 27 Jan 2026"}
+  - {underlying: SENSEX,    from: "2024-11-20", to: null,         value: 20, basis: contract_expiry, tag: SOURCE_SECONDARY}
 tick_size:
   - {underlying: ALL_INDEX_OPTIONS, from: "2025-04-01", to: null, value: 0.05, tag: ASSUMPTION, note: "master value stored as master_tick_size"}
 freeze_quantity:
@@ -16,8 +21,8 @@ freeze_quantity:
   - {underlying: ALL,       from: null,         to: "2026-10-04", value: null, tag: UNVERIFIED, note: "earlier values unverified; not binding for a 1-lot bot"}
 expiry_regime:
   - {underlying: NIFTY,     rule: weekly_tuesday,        since: "2025-09-01", tag: SOURCE_SECONDARY}
-  - {underlying: SENSEX,    rule: weekly_thursday,       since: null,         tag: FILE_CLAIM}
-  - {underlying: BANKNIFTY, rule: monthly_last_tuesday,  since: null,         tag: FILE_CLAIM}
+  - {underlying: SENSEX,    rule: weekly_thursday,       since: "2025-09-01", tag: SOURCE_SECONDARY, note: "SEBI circular 26 May 2025: Tuesday or Thursday only; Tuesday before Sep 2025"}
+  - {underlying: BANKNIFTY, rule: monthly_last_tuesday,  since: "2025-09-01", tag: SOURCE_SECONDARY, note: "no weekly since Nov 2024; last Thursday before Sep 2025"}
   - {note: "weekdays are only validation hints; the API expiry list is truth; a mismatch is logged"}
 strike_step:
   - {underlying: NIFTY,     default: 50,  tag: ASSUMPTION, note: "real step is taken from each expiry's contract list"}

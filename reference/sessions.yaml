@@ -5,15 +5,19 @@
 table_version: 2
 sessions:
   - {class: nse_index_fo,    from: "2025-04-01", to: "2026-07-31", open: "09:15", close: "15:30", tag: SOURCE_SECONDARY}
-  - {class: nse_index_fo,    from: "2026-08-03", to: null,         open: "09:15", close: "15:40", tag: SOURCE_SECONDARY, note: "NSE/FAOP/74467"}
+  - {class: nse_index_fo,    from: "2026-08-03", to: "2026-12-06", open: "09:15", close: "15:40", tag: SOURCE, note: "NSE/FAOP/74467; SEBI circular 16 Jan 2026 para 4.2.3 (equity derivatives up to 3:40 p.m.)"}
+  - {class: nse_index_fo,    from: "2026-12-07", to: null,         open: "09:15", close: "15:45", tag: SOURCE, note: "SEBI circular 15 Oct 2026 para 4.2.4; on expiry day the EXPIRING index contracts stop at 15:30 (per contract, not per class)"}
   - {class: nse_spot_index,  from: "2025-04-01", to: "2026-07-31", open: "09:15", close: "15:30", tag: SOURCE_SECONDARY}
   - {class: nse_spot_index,  from: "2026-08-03", to: null,         open: "09:15", close: "15:30", tag: UNVERIFIED, note: "close after 3 Aug unconfirmed; probe P18 and the validator use the observed modal last bar, status PROVISIONAL"}
   - {class: india_vix,       from: "2025-04-01", to: "2026-07-31", open: "09:15", close: "15:30", tag: SOURCE_SECONDARY}
   - {class: india_vix,       from: "2026-08-03", to: null,         open: "09:15", close: "15:30", tag: UNVERIFIED, note: "same as nse_spot_index"}
-  - {class: bse_index_fo,    from: "2025-04-01", to: null,         open: "09:15", close: "15:30", tag: UNVERIFIED, note: "no BSE 15:40 change seen when checked; P18 decides; PROVISIONAL until observed"}
+  - {class: bse_index_fo,    from: "2025-04-01", to: "2026-07-31", open: "09:15", close: "15:30", tag: UNVERIFIED, note: "BSE notice not opened (bseindia.com blocked); P18 decides"}
+  - {class: bse_index_fo,    from: "2026-08-03", to: "2026-12-06", open: "09:15", close: "15:40", tag: SOURCE, note: "v3: SEBI circular 16 Jan 2026 para 4.2.3 applies to every exchange; was 15:30 here, which made every SENSEX option bar after 15:30 OUTSIDE_SESSION"}
+  - {class: bse_index_fo,    from: "2026-12-07", to: null,         open: "09:15", close: "15:45", tag: SOURCE, note: "SEBI circular 15 Oct 2026 para 4.2.4; expiring index contracts stop at 15:30 on expiry day"}
   - {class: bse_spot_index,  from: "2025-04-01", to: null,         open: "09:15", close: "15:30", tag: UNVERIFIED, note: "no BSE 15:40 change seen when checked; P18 decides; PROVISIONAL until observed"}
   - {class: cash_fo_stock,   from: "2025-04-01", to: "2026-07-31", open: "09:15", close: "15:30", tag: SOURCE_SECONDARY}
-  - {class: cash_fo_stock,   from: "2026-08-03", to: null,         open: "09:15", close: "15:15", tag: SOURCE_SECONDARY, note: "continuous trading ends 15:15; closing auction 15:15-15:35 is not in 1-minute candles; morning pre-open realignment from 2026-09-07 UNVERIFIED"}
+  - {class: cash_fo_stock,   from: "2026-08-03", to: "2026-12-06", open: "09:15", close: "15:15", tag: SOURCE, note: "SEBI circular 16 Jan 2026: continuous trading ends 15:15; closing auction 15:15-15:35 is not in 1-minute candles"}
+  - {class: cash_fo_stock,   from: "2026-12-07", to: null,         open: "09:15", close: "15:30", tag: SOURCE, note: "SEBI circular 15 Oct 2026 para 4.2.1: CAS moves to 15:30-15:40, continuous trading until 15:30"}
   - {class: cash_non_fo_stock, from: "2025-04-01", to: null,       open: "09:15", close: "15:30", tag: ASSUMPTION}
   # Global instruments (USD INR, Brent, WTI, GIFT NIFTY) trade outside Indian hours: no expected bar count.
   - {class: global_indicator, from: "2025-04-01", to: null,        open: null,    close: null,    tag: ASSUMPTION, note: "no expected bar count; validator only checks structure"}
