@@ -706,9 +706,14 @@ def run_download(settings: Settings, client: HttpClient, calendar: Optional[Cale
                     exp_dates = []
                 w0, w1 = _window_bounds(settings, calendar, ["warmup_option", "test"], und, include_warmup, oldest_opt)
                 rel_exps = [e for e in exp_dates if w0 <= e <= w1 + dt.timedelta(days=35)]
+                # v3: index futures are monthly, so the future/contract list is only asked for the last expiry
+                # of each month (saves about one call per weekly expiry for NIFTY and SENSEX).
+                fut_exps = set(monthly_expiries(exp_dates))
                 for exp_d in rel_exps:
                     for ep, kind_tag in (("/v2/expired-instruments/option/contract", "OPT"),
                                          ("/v2/expired-instruments/future/contract", "FUT")):
+                        if kind_tag == "FUT" and exp_d not in fut_exps:
+                            continue
                         try:
                             rc = client.get(ep, {"instrument_key": sk, "expiry_date": iso(exp_d)}, kind="expired")
                             raw_c = rc.json.get("data") or []

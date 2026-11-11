@@ -469,3 +469,38 @@ class TestRecorder(unittest.TestCase):
             res = run_record(settings, _client(_build_fixture_transport("A")), calendar=cal,
                              now_fn=lambda: dt.datetime(2026, 11, 24, 10, 0, tzinfo=IST), sleep=lambda s: None)
             self.assertEqual(res["reason"], "NOT_A_TRADING_DAY")
+
+
+class TestSmallFixes(unittest.TestCase):
+    def test_ingest_accepts_nse_zip_and_report_avoids_long_names(self):
+        import io
+        import zipfile
+        from updl.ingest import run_ingest
+        cal = load_calendar(REF_DIR)
+        with tempfile.TemporaryDirectory() as tmp:
+            s = load_settings(MANIFEST_PATH, workdir=tmp, external_dir=str(Path(tmp) / "ext"))
+            name = "BhavCopy_NSE_FO_0_0_0_20261109_F_0000.csv"
+            buf = io.BytesIO()
+            with zipfile.ZipFile(buf, "w") as zf:
+                zf.writestr(name, "TradDt,TckrSymb\n2026-11-09,NIFTY\n")
+            src = Path(tmp) / "in"
+            src.mkdir()
+            (src / (name + ".zip")).write_bytes(buf.getvalue())
+            res = run_ingest(s, str(src), calendar=cal)
+            self.assertEqual(res["files"], 1)
+            self.assertTrue((s.external_dir / "bhavcopy" / name).exists())
+            from updl.validate import reconcile_bhavcopy
+            out = reconcile_bhavcopy(s, cal)
+            from updl.secretscan import scan_text
+            self.assertEqual(scan_text("\n".join(out["summary_lines"])), [])
+
+    def test_termux_script_syntax_and_line_endings(self):
+        import shutil
+        import subprocess
+        script = Path(__file__).resolve().parent.parent / "termux_run.sh"
+        data = script.read_bytes()
+        self.assertNotIn(b"\r\n", data)
+        self.assertIn(b"termux-wake-lock", data)
+        self.assertIn(b"pkg update -y", data)
+        if shutil.which("bash"):
+            self.assertEqual(subprocess.run(["bash", "-n", str(script)]).returncode, 0)

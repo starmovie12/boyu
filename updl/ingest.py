@@ -73,6 +73,20 @@ def run_ingest(settings: Settings, target_path: str, calendar: Optional[Calendar
     bhav_dest_dir = settings.external_dir / "bhavcopy"
     bhav_dest_dir.mkdir(parents=True, exist_ok=True)
     files = list(p.glob("*.csv")) if p.is_dir() else [p]
+    # v3: NSE serves the UDiFF bhavcopy as BhavCopy_NSE_FO_..._F_0000.csv.zip; unzip it here (stdlib), so the
+    # owner does not need an unzip app on the phone.
+    zips = list(p.glob("*.zip")) if p.is_dir() else ([p] if p.suffix.lower() == ".zip" else [])
+    if zips:
+        import zipfile
+        files = [f for f in files if f.suffix.lower() != ".zip"]
+        for z in zips:
+            with zipfile.ZipFile(z) as zf:
+                for member in zf.namelist():
+                    name = Path(member).name
+                    if name.lower().endswith(".csv"):
+                        dest = bhav_dest_dir / name
+                        atomic_write_bytes(dest, zf.read(member), overwrite=True)
+                        files.append(dest)
     unmapped_all = []
     ingested = 0
     for f in files:
