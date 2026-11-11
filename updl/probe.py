@@ -274,7 +274,9 @@ def run_probe(settings: Settings, client: HttpClient, calendar: Optional[Calenda
     # ---- P09: expired Get Expiries for Nifty -------------------------------
     nifty_expiries = []
     try:
-        res = client.get("/v2/expired-instruments/expiries", {"instrument_key": nifty_key}, kind="expired")
+        # Only the analytics token set: P09 itself is the proof test for it (rule 2); nothing is assumed.
+        p09_kind = "expired_analytics" if expired_token_used == "analytics" else "expired"
+        res = client.get("/v2/expired-instruments/expiries", {"instrument_key": nifty_key}, kind=p09_kind)
         raw_exps = res.json.get("data") if isinstance(res.json.get("data"), list) else []
         nifty_expiries = sorted({to_date(x) for x in raw_exps if x})
         if nifty_expiries:
@@ -284,6 +286,7 @@ def run_probe(settings: Settings, client: HttpClient, calendar: Optional[Calenda
             rec("P09", "FAIL", res.status, count=0)
         if nifty_expiries and expired_token_used == "analytics":
             analytics_accepted_for_expired = True      # only the analytics token was sent and it worked
+            client.analytics_ok_for_expired = True     # proven: the rest of the expired tests may use it
     except PlusRequired as err:
         plus_required = True
         rec("P09", "FAIL", err.status, reason="PLUS_REQUIRED", code=err.code, token_used=expired_token_used)

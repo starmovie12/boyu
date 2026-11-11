@@ -12,8 +12,8 @@ params:
   STRIKE_MARGIN_STEPS: 6              # minimum margin each side of the day range, in strike steps
   STRIKE_DELTA_MARGIN_K: 0.6          # extra margin = K x spot x (VIX_day_high/100) x sqrt(calendar_DTE/365); band margin = max(STRIKE_MARGIN_STEPS x step, that). Keeps delta 0.30..0.70 strikes on long-dated (monthly) contracts
   WIDE_CHAIN_STEPS: 20                # P1 only (OI walls, Max Pain, GEX, PCR); band = [day_low - 20 steps, day_high + 20 steps]
-  RATE_CALLS_PER_MIN: 60              # v3: the official rate-limit page (checked 12 Nov 2026) says 50/s, 500/min, 2000 per 30 min for standard APIs incl. historical candles; 60/min stays well inside. Lower with --rate if 429s appear
-  RATE_MAX_PER_30MIN: 1800            # 90% of the documented 2000 per 30 min
+  RATE_CALLS_PER_MIN: 30              # conservative: Upstox docs show conflicting limits (25/250/1000 vs 50/500/2000 per s/min/30min); probe measures, owner may raise
+  RATE_MAX_PER_30MIN: 900             # 90% of the lower documented figure (1000)
   DATA_RIGHTS: "UNVERIFIED"           # OK | MINIMAL | NOT_ALLOWED | UNVERIFIED
 instruments:
   NIFTY:     {spot_key: "NSE_INDEX|Nifty 50", exchange: NSE, fo_segment: NSE_FO, expiry: weekly_tuesday, strike_step_default: 50}

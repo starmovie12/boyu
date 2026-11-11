@@ -168,11 +168,20 @@ class TestTokenAndPlanErrors(unittest.TestCase):
                 v3_candle_path("NSE_INDEX|Nifty 50", "days", 1, "2026-05-11", "2026-05-11"))
         self.assertEqual(ctx2.exception.message, TOKEN_MISSING)
 
-    def test_analytics_token_is_sent_to_expired_endpoints_when_no_access_token(self):
+    def test_analytics_token_on_expired_endpoints_only_after_probe_proof(self):
         from updl.tokens import Tokens
-        self.assertEqual(Tokens(analytics="a_value").for_kind("expired"), "a_value")
+        self.assertIsNone(Tokens(analytics="a_value").for_kind("expired"))
+        self.assertEqual(Tokens(analytics="a_value").for_kind("expired", analytics_ok_for_expired=True), "a_value")
         self.assertEqual(Tokens(analytics="a_value", access="b_value").for_kind("expired"), "b_value")
-        self.assertIsNone(Tokens().for_kind("expired"))
+        # probe with only the analytics token: P09 tests it, and a success lets the probe continue with it
+        cal = load_calendar(REF_DIR)
+        with tempfile.TemporaryDirectory() as tmp:
+            settings = load_settings(MANIFEST_PATH, workdir=tmp)
+            tr = _expired_override(_build_fixture_transport("A"), 401, "UDAPI100050", require_header=True)
+            rep = run_probe(settings, _client(tr, Tokens(analytics="dummy_value")), calendar=cal,
+                            probe_today=dt.date(2026, 11, 11))
+            self.assertTrue(rep["analytics_accepted_for_expired"])
+            self.assertIn(rep["selected_plan"], ("A", "A_PARTIAL"))
 
     def test_probe_falls_back_to_plan_b_when_plus_error_comes_as_401(self):
         from updl.tokens import Tokens
