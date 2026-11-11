@@ -1,0 +1,19 @@
+# bhavcopy_columns.yaml (table_version 2) -- maps published NSE UDiFF column names to internal names.
+# The mapping is UNVERIFIED: ingest prints the unmapped columns and never guesses.
+# If a name below is wrong, correct it here after looking at a real file.
+table_version: 2
+tag: UNVERIFIED
+columns:
+  symbol:        TckrSymb
+  expiry:        XpryDt
+  strike:        StrkPric
+  option_type:   OptnTp
+  open:          OpnPric
+  high:          HghPric
+  low:           LwPric
+  close:         ClsPric
+  settlement:    SttlmPric
+  open_interest: OpnIntrst
+  volume:        TtlTradgVol
+  trade_date:    TradDt
+  instrument:    FinInstrmTp
