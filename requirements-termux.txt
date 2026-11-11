@@ -1,0 +1,16 @@
+# Android Termux ke liye: sirf pure-Python packages.
+#
+# numpy, pandas, scipy, pyarrow ko pip se MAT install karo. Termux (Android, aarch64)
+# par inke wheels nahi hote, pip unhe C/C++ se compile karta hai aur numpy ka build
+# fail ho jata hai (error: call to undeclared library function 'cpow' ... complex.h).
+# Inhe Termux ke apne ready-made packages se lo:
+#
+#   pkg update -y
+#   pkg install -y python python-numpy python-scipy python-pandas python-pyarrow
+#
+# Phir yeh file:  pip install -r requirements-termux.txt
+# (ya bas: bash termux_run.sh setup, jo upar ke dono kaam khud kar deta hai)
+requests>=2.32.5
+PyYAML>=6.0.2
+pytest
+requests-mock
