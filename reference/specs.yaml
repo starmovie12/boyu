@@ -1,0 +1,25 @@
+# specs.yaml (table_version 2) -- contract specs by date. Every row has a tag.
+# Today's instrument master may show different numbers for far-dated contracts
+# (e.g. 25 for some 2027 Sensex contracts): the downloader records both and uses THIS table for the window.
+table_version: 2
+lot_size:
+  - {underlying: NIFTY,     from: "2025-04-01", to: null, value: 65, tag: FILE_CLAIM}
+  - {underlying: BANKNIFTY, from: "2025-04-01", to: null, value: 30, tag: FILE_CLAIM}
+  - {underlying: SENSEX,    from: "2025-04-01", to: null, value: 20, tag: FILE_CLAIM}
+tick_size:
+  - {underlying: ALL_INDEX_OPTIONS, from: "2025-04-01", to: null, value: 0.05, tag: ASSUMPTION, note: "master value stored as master_tick_size"}
+freeze_quantity:
+  - {underlying: NIFTY,     from: "2026-11-02", to: null,         value: 1800, tag: FILE_CLAIM}
+  - {underlying: BANKNIFTY, from: "2026-11-02", to: null,         value: 900,  tag: FILE_CLAIM}
+  - {underlying: NIFTY,     from: "2026-10-05", to: "2026-11-01", value: 3510, tag: FILE_CLAIM}
+  - {underlying: BANKNIFTY, from: "2026-10-05", to: "2026-11-01", value: 1440, tag: FILE_CLAIM}
+  - {underlying: ALL,       from: null,         to: "2026-10-04", value: null, tag: UNVERIFIED, note: "earlier values unverified; not binding for a 1-lot bot"}
+expiry_regime:
+  - {underlying: NIFTY,     rule: weekly_tuesday,        since: "2025-09-01", tag: SOURCE_SECONDARY}
+  - {underlying: SENSEX,    rule: weekly_thursday,       since: null,         tag: FILE_CLAIM}
+  - {underlying: BANKNIFTY, rule: monthly_last_tuesday,  since: null,         tag: FILE_CLAIM}
+  - {note: "weekdays are only validation hints; the API expiry list is truth; a mismatch is logged"}
+strike_step:
+  - {underlying: NIFTY,     default: 50,  tag: ASSUMPTION, note: "real step is taken from each expiry's contract list"}
+  - {underlying: BANKNIFTY, default: 100, tag: ASSUMPTION}
+  - {underlying: SENSEX,    default: 100, tag: ASSUMPTION}
