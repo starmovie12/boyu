@@ -9,6 +9,7 @@ charges:
   - {name: upstox_brokerage_per_order_plus_rs,  from: null, to: null, value: 30, tag: SOURCE}
   - {name: upstox_api_order_offer_rs, from: null, to: null, valid_to: null, value: 10, tag: FILE_CLAIM, note: "end date differs between two Upstox pages; valid_to left null"}
   - {name: gst_pct_on_brokerage_and_exchange, from: null, to: null, value: 18, tag: ASSUMPTION}
-  - {name: sebi_turnover_fee, from: null, to: null, value: null, tag: UNVERIFIED}
-  - {name: stamp_duty, from: null, to: null, value: null, tag: UNVERIFIED}
-  - {name: bse_sensex_option_charges, from: null, to: null, value: null, tag: UNVERIFIED, note: "the cost model must refuse Sensex until this is filled"}
+  - {name: stt_exercised_option_pct_of_intrinsic, from: "2026-04-01", to: null, value: 0.15, tag: UNVERIFIED, note: "secondary sources only (not opened by me); was 0.125"}
+  - {name: sebi_turnover_fee_rs_per_crore, from: null, to: null, value: 10, tag: UNVERIFIED, note: "secondary sources only"}
+  - {name: stamp_duty_pct_buy_side, from: null, to: null, value: 0.003, tag: UNVERIFIED, note: "secondary sources only"}
+  - {name: bse_sensex_option_txn_pct_of_premium, from: "2024-10-01", to: null, value: 0.0325, tag: UNVERIFIED, note: "secondary sources only; bseindia.com was blocked; the cost model must still refuse Sensex until verified"}

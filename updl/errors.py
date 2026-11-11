@@ -57,7 +57,12 @@ class ApiError(UpdlError):
 
 
 class PlusRequired(ApiError):
-    pass
+    """UDAPI1149: the expired-instruments APIs need an Upstox Plus subscription. Users have seen this code
+    arrive with HTTP 401 as well as 4xx, so the code is read before a 401 is treated as an expired token."""
+
+
+class TokenNotPermitted(ApiError):
+    """UDAPI100067: this token type (for example an analytics / extended token) is not allowed on the endpoint."""
 
 
 class RetryExhausted(UpdlError):

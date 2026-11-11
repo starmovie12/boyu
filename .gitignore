@@ -1,0 +1,23 @@
+# Python / tooling
+.venv/
+venv/
+__pycache__/
+*.pyc
+.pytest_cache/
+
+# Downloaded market data and outputs: never commit (DATA_RIGHTS is UNVERIFIED)
+updl_data/
+phone_outputs/
+*.parquet
+
+# Secrets: tokens live only in env vars or in a file OUTSIDE the project
+.env
+.env.*
+.upstox_tokens*
+
+# Local Claude Code files
+.claude/baseline_pytest.txt
+.claude/settings.local.json
+
+# Owner-supplied external files (bhavcopy, events, stocks.csv copy)
+external/

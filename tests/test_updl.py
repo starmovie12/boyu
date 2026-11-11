@@ -641,8 +641,12 @@ time.sleep(30)
                 load_holdout(settings.handoff_dir, "spot_1m", environ={"OPEN_HOLDOUT_ONCE": "1"})
             self.assertEqual(ctx.exception.exit_code, EXIT_HOLDOUT_OPENED)
 
+            # v3 fix: the root branch was inverted (it asserted "not read-only" for root) and os.geteuid does
+            # not exist on Windows. Same check, correct for every user: a sealed holdout file is not writable.
+            is_root = getattr(os, "geteuid", lambda: 1)() == 0
             for hp in list_parts(settings.handoff_dir / "store", "holdout"):
-                self.assertFalse(os.access(hp, os.W_OK) if os.geteuid() != 0 else (hp.stat().st_mode & 0o222) == 0)
+                writable = bool(hp.stat().st_mode & 0o222) if is_root else os.access(hp, os.W_OK)
+                self.assertFalse(writable, f"holdout file still writable: {hp.name}")
 
     def test_T16_no_filling_allowed(self):
         with self.assertRaises(FillingForbidden):

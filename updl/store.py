@@ -28,6 +28,7 @@ NO_VOLUME_TABLES = {"spot_1m", "spot_1d", "vix_1m", "vix_1d", "global_1m"}
 TABLE_METADATA = {"volume_unit": "UNVERIFIED", "adjusted_status": "UNVERIFIED", "timezone": "Asia/Kolkata",
                   "look_ahead_rule": "uses only bars with ts_close <= decision time", "schema_version": "2"}
 SOURCE_V3, SOURCE_EXPIRED = "upstox_v3", "upstox_expired_v2"
+FETCHED_COL = "_fetched_utc"   # compaction-only helper column, never written
 
 
 # ---- generic file helpers --------------------------------------------------------------------------------------
@@ -304,23 +305,29 @@ def compact(settings, calendar, log=None) -> dict:
                         log("bad_rows", count=nbad, raw=c["raw_path"])
                     rows = [r for r in rows if w0 <= r["ts_open"].date() <= w1]
                     if rows:
-                        frames.append(rows_to_frame(rows, meta, calendar, c["fetch_run_id"] or "r0", c["sha256"]))
+                        frame = rows_to_frame(rows, meta, calendar, c["fetch_run_id"] or "r0", c["sha256"])
+                        # v3: "latest fetch wins" is decided by the fetch time stored in the state (ISO UTC,
+                        # sortable). fetch_run_id is only rHHMMSS, so a next-morning re-fetch (r080000) sorted
+                        # BEFORE the previous evening's run (r220000) and the older data won.
+                        frames.append(frame.assign(**{FETCHED_COL: str(c.get("fetched_utc") or "")}))
                 if not frames:
                     continue
                 df = pd.concat(frames, ignore_index=True)
-                df = df.sort_values(["instrument_key", "ts_open", "fetch_run_id"], kind="stable")
+                df = df.sort_values(["instrument_key", "ts_open", FETCHED_COL, "fetch_run_id"], kind="stable")
                 same_run = df.duplicated(["instrument_key", "ts_open", "fetch_run_id"], keep="first")
                 for d_, n_ in df[same_run].groupby("trading_date").size().items():
                     dupes[f"{table}|{und}|{d_}"] = int(n_)
                     log("duplicate_bar_removed", table=table, underlying=und, trading_date=str(d_), count=int(n_))
                 df = df[~same_run]
-                df = df.drop_duplicates(["instrument_key", "ts_open"], keep="last")  # latest fetch run wins
+                df = df.drop_duplicates(["instrument_key", "ts_open"], keep="last")  # latest fetch wins
                 for d_, part in df.groupby("trading_date"):
                     p = part_path(settings.store_dir, partition_of(d_, settings.holdout_start), table, und, d_)
-                    if p.exists():  # keep rows from raw files that are gone (DATA_RIGHTS=MINIMAL); latest run wins
-                        part = pd.concat([read_parquet(p), part], ignore_index=True)
-                        part = part.sort_values("fetch_run_id", kind="stable").drop_duplicates(
+                    if p.exists():  # keep rows from raw files that are gone (DATA_RIGHTS=MINIMAL); fresh rows win
+                        old = read_parquet(p).assign(**{FETCHED_COL: ""})
+                        part = pd.concat([old, part], ignore_index=True)
+                        part = part.sort_values(FETCHED_COL, kind="stable").drop_duplicates(
                             ["instrument_key", "ts_open"], keep="last").sort_values(["instrument_key", "ts_open"])
+                    part = part.drop(columns=[FETCHED_COL])
                     write_parquet(part.reset_index(drop=True), p, {**TABLE_METADATA, "table": table})
                     written += 1
         dupes_path.parent.mkdir(parents=True, exist_ok=True)

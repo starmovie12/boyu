@@ -33,7 +33,12 @@ class Tokens:
         return [t for t in (self.analytics, self.access) if t]
 
     def for_kind(self, kind: str, analytics_ok_for_expired: bool = False) -> Optional[str]:
-        """kind: 'v3' (candles, masters) or 'expired'."""
+        """kind: 'v3' (candles, masters, option chain) or 'expired'.
+
+        PROMPT_02 rule 2: expired-instrument calls use the access token, or the analytics token only when the
+        probe proved it works (`analytics_ok_for_expired`). Upstox staff said in 2026 that a Plus user's
+        analytics token works there; the probe tests that itself (P09 when only the analytics token is set,
+        P16 when both are set) instead of assuming it."""
         if kind == "expired":
             if self.access:
                 return self.access

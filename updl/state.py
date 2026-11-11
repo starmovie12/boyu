@@ -143,9 +143,14 @@ class Catalog:
         CREATE TABLE IF NOT EXISTS expiries(underlying TEXT, expiry_date TEXT, source TEXT,
             PRIMARY KEY(underlying, expiry_date));
         CREATE TABLE IF NOT EXISTS first_seen(instrument_key TEXT PRIMARY KEY, first_date TEXT);
+        CREATE TABLE IF NOT EXISTS first_seen_v3(instrument_key TEXT PRIMARY KEY, first_date TEXT,
+            evidence_from TEXT);
         CREATE TABLE IF NOT EXISTS kv(k TEXT PRIMARY KEY, v TEXT);
         """)
         self.db.commit()
+        # v3: the old `first_seen` table stored "first candle of the first chunk" even when that chunk started
+        # in the middle of the contract's life. In the backwards 1-month `continue` mode that hid every
+        # contract straddling a month boundary on the earlier month's days. That table is no longer read.
 
     def close(self):
         self.db.close()
@@ -181,15 +186,29 @@ class Catalog:
             out.append(d)
         return out
 
-    def note_first_seen(self, key, d):
+    def note_first_seen(self, key, d, requested_from=None):
+        """Record the first date a contract is known to trade.
+
+        A candle on date d proves the contract existed on d, so an existing record is always lowered to d.
+        A NEW record is only created with evidence: the request started on `requested_from` and the first
+        candle came later (d > requested_from), i.e. the contract showed no candle on the earlier requested
+        days. Without that evidence nothing is recorded, so days before a request window are never hidden.
+        """
         d = str(to_date(d))
-        row = self.db.execute("SELECT first_date FROM first_seen WHERE instrument_key=?", (key,)).fetchone()
-        if row is None or d < row[0]:
-            self.db.execute("INSERT OR REPLACE INTO first_seen VALUES(?,?)", (key, d))
+        frm = str(to_date(requested_from)) if requested_from is not None else None
+        row = self.db.execute("SELECT first_date FROM first_seen_v3 WHERE instrument_key=?", (key,)).fetchone()
+        if row is not None:
+            if d < row[0]:
+                self.db.execute("UPDATE first_seen_v3 SET first_date=? WHERE instrument_key=?", (d, key))
+                self.db.commit()
+            return
+        if frm is not None and d > frm:
+            self.db.execute("INSERT INTO first_seen_v3 VALUES(?,?,?)", (key, d, frm))
             self.db.commit()
 
     def first_seen(self) -> dict:
-        return {k: dt.date.fromisoformat(v) for k, v in self.db.execute("SELECT instrument_key, first_date FROM first_seen")}
+        return {k: dt.date.fromisoformat(v)
+                for k, v in self.db.execute("SELECT instrument_key, first_date FROM first_seen_v3")}
 
     def set_kv(self, k, v):
         self.db.execute("INSERT OR REPLACE INTO kv VALUES(?,?)", (k, str(v)))

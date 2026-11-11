@@ -18,7 +18,8 @@ from dataclasses import dataclass, field
 from typing import Optional
 
 from .errors import (ApiError, BudgetExceeded, NotAllowedPath, PlusRequired, RetryExhausted, TokenExpired,
-                     TransportError)
+                     TokenNotPermitted, TransportError)
+from .messages import TOKEN_EXPIRED, TOKEN_MISSING
 from .tokens import Tokens
 
 BASE_URL = "https://api.upstox.com"
@@ -30,6 +31,9 @@ ALLOWED_PATH_TEMPLATES = (
     "/v2/expired-instruments/future/contract",
     "/v2/expired-instruments/historical-candle/{expired_instrument_key}/{interval}/{to_date}/{from_date}",
     "/v2/instruments/search",
+    # v3: live option chain for the Recorder (read-only GET, Analytics Token supported). Added on purpose:
+    # Upstox has no historical chain endpoint, so bid/ask/IV/greeks can only be saved live. See DECISIONS.md.
+    "/v2/option/chain",
 )
 MASTER_URLS = {
     "NSE": "https://assets.upstox.com/market-quote/instruments/exchange/NSE.json.gz",
@@ -43,6 +47,17 @@ CONNECT_TIMEOUT = 10
 READ_TIMEOUT = 60
 CIRCUIT_PAUSE_SECONDS = 600
 HEADER_HINTS = ("rate", "limit", "retry", "quota")
+PLUS_REQUIRED_CODE = "UDAPI1149"        # "available exclusively with an Upstox Plus plan subscription"
+TOKEN_NOT_PERMITTED_CODE = "UDAPI100067"  # token type not allowed on this endpoint (community report, 2026-06)
+
+
+def _raise_for_code(status: int, code: str, text: str):
+    """Map documented error codes to specific exceptions; otherwise a plain ApiError."""
+    if code == PLUS_REQUIRED_CODE:
+        raise PlusRequired(status, code, text)
+    if code == TOKEN_NOT_PERMITTED_CODE:
+        raise TokenNotPermitted(status, code, text)
+    raise ApiError(status, code, text)
 
 
 def _template_regex(template: str):
@@ -262,7 +277,13 @@ class HttpClient:
             status = resp.status_code
             hints = self._hints(resp.headers)
             if status == 401:
-                raise TokenExpired("token expired or not accepted")
+                # v3: read the error code first. UDAPI1149 (Plus required) has been reported with HTTP 401,
+                # and treating it as an expired token aborted the probe instead of falling back to Plan B.
+                code, text = _parse_error(resp.content)
+                if code in (PLUS_REQUIRED_CODE, TOKEN_NOT_PERMITTED_CODE):
+                    _raise_for_code(status, code, text)
+                sent_token = any(k.lower() == "authorization" for k in (headers or {}))
+                raise TokenExpired(TOKEN_EXPIRED if sent_token else TOKEN_MISSING)
             if status == 429:
                 self.consecutive_429 += 1
                 self._streak = 0
@@ -295,9 +316,7 @@ class HttpClient:
                 continue
             if status >= 400:
                 code, text = _parse_error(resp.content)
-                if code == "UDAPI1149":
-                    raise PlusRequired(status, code, text)
-                raise ApiError(status, code, text)
+                _raise_for_code(status, code, text)
             if not want_json:
                 self._streak += 1
                 self.longest_ok_streak = max(self.longest_ok_streak, self._streak)
@@ -315,9 +334,7 @@ class HttpClient:
                 continue
             if data.get("status") == "error":
                 code, text = _parse_error(resp.content)
-                if code == "UDAPI1149":
-                    raise PlusRequired(status, code, text)
-                raise ApiError(status, code, text)
+                _raise_for_code(status, code, text)
             self._streak += 1
             self.longest_ok_streak = max(self.longest_ok_streak, self._streak)
             return Result(status, resp.content, data, shown_path, hints)
