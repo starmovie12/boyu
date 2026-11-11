@@ -21,9 +21,16 @@ shift || true
 case "$ACTION" in
     setup)
         echo "[Termux Setup] Environment ready: $($PYTHON_BIN --version)"
-        if [ -x ".venv/bin/pip" ]; then
-            .venv/bin/pip install -r requirements.txt
+        if command -v pkg >/dev/null 2>&1 && [ -n "${PREFIX:-}" ]; then
+            # Termux: numpy/pandas/scipy/pyarrow ko pip se compile mat karo (numpy build fail hota hai).
+            # Termux ke ready-made packages lo, baaki pure-Python cheezein pip se.
+            echo "[Termux Setup] pkg se numpy, pandas, scipy, pyarrow install ho rahe hain..."
+            pkg install -y python-numpy python-scipy python-pandas python-pyarrow
+            "$PYTHON_BIN" -m pip install -r requirements-termux.txt
+        else
+            "$PYTHON_BIN" -m pip install -r requirements.txt
         fi
+        "$PYTHON_BIN" -c "import numpy, pandas, scipy, pyarrow, yaml, requests; print('[Termux Setup] OK -> pandas', pandas.__version__, '| numpy', numpy.__version__, '| scipy', scipy.__version__, '| pyarrow', pyarrow.__version__)"
         ;;
     probe)
         "$PYTHON_BIN" -m updl probe "$@"
