@@ -1,0 +1,14 @@
+# charges.yaml (table_version 2) -- dated charge table, copied to the handoff for the later cost model.
+# This program does NOT use it for any trading calculation.
+table_version: 2
+charges:
+  - {name: stt_option_sell_pct_of_premium, from: "2026-04-01", to: null,         value: 0.15,    tag: FILE_CLAIM}
+  - {name: stt_option_sell_pct_of_premium, from: null,         to: "2026-03-31", value: 0.10,    tag: FILE_CLAIM}
+  - {name: nse_index_option_txn_pct_of_premium, from: "2026-03-01", to: null,     value: 0.03553, tag: FILE_CLAIM}
+  - {name: upstox_brokerage_per_order_basic_rs, from: null, to: null, value: 20, tag: SOURCE}
+  - {name: upstox_brokerage_per_order_plus_rs,  from: null, to: null, value: 30, tag: SOURCE}
+  - {name: upstox_api_order_offer_rs, from: null, to: null, valid_to: null, value: 10, tag: FILE_CLAIM, note: "end date differs between two Upstox pages; valid_to left null"}
+  - {name: gst_pct_on_brokerage_and_exchange, from: null, to: null, value: 18, tag: ASSUMPTION}
+  - {name: sebi_turnover_fee, from: null, to: null, value: null, tag: UNVERIFIED}
+  - {name: stamp_duty, from: null, to: null, value: null, tag: UNVERIFIED}
+  - {name: bse_sensex_option_charges, from: null, to: null, value: null, tag: UNVERIFIED, note: "the cost model must refuse Sensex until this is filled"}
