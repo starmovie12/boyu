@@ -574,7 +574,7 @@ def _fetch_and_store_chunk(settings: Settings, client: HttpClient, state: State,
 
         rows, _ = parse_candles(res.json)
         if rows:
-            catalog.note_first_seen(ikey, rows[0]["ts_open"].date())
+            catalog.note_first_seen(ikey, rows[0]["ts_open"].date(), requested_from=f_d)
         meta = {
             "item_id": item_id,
             "table": table,
