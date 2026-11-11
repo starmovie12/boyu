@@ -1,0 +1,9 @@
+# globals.yaml (table_version 2) -- names looked up in global.json.gz for D11 and probe P17. Tag ASSUMPTION.
+# The match is by exact trading_symbol/name first, then by "contains". A name that does not resolve is logged, never skipped silently.
+table_version: 2
+tag: ASSUMPTION
+names:
+  - USD INR
+  - Oil Brent
+  - Oil WTI
+  - GIFT NIFTY
