@@ -2,8 +2,16 @@
 
 TOKEN_EXPIRED = "Token expire ho gaya. Naya token banao aur wahi command dobara chalao. Kaam wahin se aage badhega."
 DATA_RIGHTS_WARNING = "Data sirf apne use ke liye hai. Kisi ko mat do. Upstox se likhit jawab lo."
-PLAN_A_PARTIAL = "Expired data poore 6 mahine peeche tak nahi hai. Window chhoti ho gayi. Recorder bhi shuru karo."
-PLAN_B = "Option history poori nahi hai. Recorder abhi shuru karo."
+TOKEN_MISSING = ("Token nahi mila. UPSTOX_ANALYTICS_TOKEN (ya UPSTOX_ACCESS_TOKEN, ya UPSTOX_TOKEN_FILE) set karo, "
+                 "phir wahi command dobara chalao.")
+PLAN_A_PARTIAL = ("Expired data poore 6 mahine peeche tak nahi hai. Window chhoti ho gayi. "
+                  "Aage ke liye market time mein Recorder chalao: python -m updl record")
+PLAN_B = ("Expired option history nahi mili (Upstox Plus chahiye). Aage ke liye market time mein "
+          "Recorder chalao: python -m updl record")
+PROBE_TOKEN_BLOCKED = ("Probe token ki wajah se adhura raha (token nahi mila ya reject hua). Token theek karke "
+                       "`python -m updl probe` dobara chalao.")
+SDCARD_HINT = ("Phone ke Download folder mein copy nahi ho paya. Termux mein ek baar `termux-setup-storage` "
+               "chalao aur Allow dabao. Zip abhi bhi yahan hai:")
 PLAN_C = "Plan C se idea reject ho sakta hai, approve nahi."
 PROBE_MISSING = ("probe_report.json nahi mila ya 7 din se purana hai ya usme secret mila. "
                  "Pehle `python -m updl probe` chalao.")

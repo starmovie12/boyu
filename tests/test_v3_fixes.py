@@ -119,3 +119,84 @@ class TestCompactLatestFetchWins(unittest.TestCase):
             compact(settings, cal)
             df2 = read_parquet(parts[0])
             self.assertEqual(set(df2["fetch_run_id"]), {"r080000"})
+
+
+def _expired_override(base, status, code, msg="x", require_header=False):
+    """Wrap the fixture: expired endpoints answer with an error (optionally only when no token is sent)."""
+    import json as _json
+    from updl.client import RawResponse
+
+    class T:
+        def __init__(self):
+            self.requests = []
+
+        def get(self, url, headers=None, timeout=None):
+            self.requests.append((url, headers))
+            if "/v2/expired-instruments/" in url:
+                has_auth = any(k.lower() == "authorization" for k in (headers or {}))
+                if not require_header or not has_auth:
+                    body = {"status": "error", "errors": [{"errorCode": code, "message": msg}]}
+                    return RawResponse(status, {}, _json.dumps(body).encode())
+            return base.get(url, headers, timeout)
+    return T()
+
+
+class TestTokenAndPlanErrors(unittest.TestCase):
+    def test_client_reads_error_code_before_treating_401_as_expired_token(self):
+        import json as _json
+        from updl.client import RawResponse, v3_candle_path
+        from updl.errors import PlusRequired, TokenExpired, TokenNotPermitted
+        from updl.messages import TOKEN_EXPIRED, TOKEN_MISSING
+        from updl.tokens import Tokens
+
+        def answer(status, code):
+            body = _json.dumps({"status": "error", "errors": [{"errorCode": code, "message": "m"}]}).encode()
+            return type("T", (), {"get": lambda self, u, headers=None, timeout=None: RawResponse(status, {}, body)})()
+
+        path = "/v2/expired-instruments/expiries"
+        with self.assertRaises(PlusRequired):
+            _client(answer(401, "UDAPI1149"), Tokens(access="dummy_value")).get(path, {"instrument_key": "x"}, "expired")
+        with self.assertRaises(PlusRequired):
+            _client(answer(403, "UDAPI1149"), Tokens(access="dummy_value")).get(path, {"instrument_key": "x"}, "expired")
+        with self.assertRaises(TokenNotPermitted):
+            _client(answer(401, "UDAPI100067"), Tokens(analytics="dummy_value")).get(path, {"instrument_key": "x"}, "expired")
+        with self.assertRaises(TokenExpired) as ctx:
+            _client(answer(401, "UDAPI100050"), Tokens(access="dummy_value")).get(path, {"instrument_key": "x"}, "expired")
+        self.assertEqual(ctx.exception.message, TOKEN_EXPIRED)
+        with self.assertRaises(TokenExpired) as ctx2:
+            _client(answer(401, "UDAPI100050"), Tokens()).get(
+                v3_candle_path("NSE_INDEX|Nifty 50", "days", 1, "2026-05-11", "2026-05-11"))
+        self.assertEqual(ctx2.exception.message, TOKEN_MISSING)
+
+    def test_analytics_token_is_sent_to_expired_endpoints_when_no_access_token(self):
+        from updl.tokens import Tokens
+        self.assertEqual(Tokens(analytics="a_value").for_kind("expired"), "a_value")
+        self.assertEqual(Tokens(analytics="a_value", access="b_value").for_kind("expired"), "b_value")
+        self.assertIsNone(Tokens().for_kind("expired"))
+
+    def test_probe_falls_back_to_plan_b_when_plus_error_comes_as_401(self):
+        from updl.tokens import Tokens
+        cal = load_calendar(REF_DIR)
+        with tempfile.TemporaryDirectory() as tmp:
+            settings = load_settings(MANIFEST_PATH, workdir=tmp)
+            tr = _expired_override(_build_fixture_transport("A"), 401, "UDAPI1149", "Plus only")
+            rep = run_probe(settings, _client(tr, Tokens(analytics="dummy_value")), calendar=cal,
+                            probe_today=dt.date(2026, 11, 11))
+            self.assertEqual(rep["selected_plan"], "B")
+            self.assertEqual(rep["tests"]["P09"]["reason"], "PLUS_REQUIRED")
+            self.assertTrue(settings.probe_txt.exists())
+
+    def test_probe_without_token_writes_report_and_blocks_download(self):
+        from updl.errors import ProbeMissing, TokenExpired
+        from updl.probe import check_probe_fresh
+        from updl.tokens import Tokens
+        cal = load_calendar(REF_DIR)
+        with tempfile.TemporaryDirectory() as tmp:
+            settings = load_settings(MANIFEST_PATH, workdir=tmp)
+            tr = _expired_override(_build_fixture_transport("A"), 401, "UDAPI100050", require_header=True)
+            with self.assertRaises(TokenExpired):
+                run_probe(settings, _client(tr, Tokens()), calendar=cal, probe_today=dt.date(2026, 11, 11))
+            self.assertTrue(settings.probe_txt.exists())
+            self.assertIn("BLOCKED_TOKEN", settings.probe_txt.read_text(encoding="utf-8"))
+            with self.assertRaises(ProbeMissing):
+                check_probe_fresh(settings)

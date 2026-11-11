@@ -11,12 +11,13 @@ from typing import Optional
 
 from .client import MASTER_URLS, HttpClient, expired_candle_path, v3_candle_path
 from .config import Settings
+from .config import PLANS
 from .errors import (AmbiguousKey, ApiError, BudgetExceeded, PlusRequired, ProbeMissing, RetryExhausted,
-                     RightsNotAllowed)
+                     RightsNotAllowed, TokenExpired, TokenNotPermitted)
 from .master import (equity_key, find_global, listed_contracts, parse_master_bytes, resolve_spot_key,
                      search_global)
 from .messages import (DATA_RIGHTS_WARNING, PLAN_A_PARTIAL, PLAN_B, PLAN_C, PROBE_MISSING,
-                       RIGHTS_NOT_ALLOWED)
+                       PROBE_TOKEN_BLOCKED, RIGHTS_NOT_ALLOWED)
 from .secretscan import scan_file
 from .sessions import Calendar, load_calendar
 from .store import atomic_write_bytes, parse_candles
@@ -24,6 +25,7 @@ from .timeutil import has_ist_offset, iso, today_ist, to_date, utc_iso
 
 PROBE_BUDGET = 40
 KEY_FORMAT_PARTS = 3
+PLAN_BLOCKED_TOKEN = "BLOCKED_TOKEN"   # written when the expired test could not run because of the token
 
 
 def _sample_candles(rows: list) -> list:
@@ -75,6 +77,8 @@ def check_probe_fresh(settings: Settings, secrets=()) -> dict:
         age_days = (dt.datetime.now(dt.timezone.utc) - created).total_seconds() / 86400.0
         if age_days > 7.0:
             raise ProbeMissing(PROBE_MISSING)
+        if data.get("selected_plan") not in PLANS:
+            raise ProbeMissing(PROBE_TOKEN_BLOCKED)
         return data
     except ProbeMissing:
         raise
@@ -110,6 +114,9 @@ def run_probe(settings: Settings, client: HttpClient, calendar: Optional[Calenda
 
     def rec(pid: str, status: str, http_status: int = 0, **info):
         tests[pid] = {"status": status, "http_status": http_status, **info}
+
+    token_blocked = None        # "NO_TOKEN" | "TOKEN_REJECTED" when P09 got a 401 for the token itself
+    expired_token_used = ("access" if client.tokens.access else ("analytics" if client.tokens.analytics else "none"))
 
     # ---- P01: Instrument masters NSE, BSE, global --------------------------
     try:
@@ -275,9 +282,19 @@ def run_probe(settings: Settings, client: HttpClient, calendar: Optional[Calenda
                 oldest_expiry=iso(nifty_expiries[0]), newest_expiry=iso(nifty_expiries[-1]))
         else:
             rec("P09", "FAIL", res.status, count=0)
+        if nifty_expiries and expired_token_used == "analytics":
+            analytics_accepted_for_expired = True      # only the analytics token was sent and it worked
     except PlusRequired as err:
         plus_required = True
-        rec("P09", "FAIL", err.status, reason="PLUS_REQUIRED", code=err.code)
+        rec("P09", "FAIL", err.status, reason="PLUS_REQUIRED", code=err.code, token_used=expired_token_used)
+    except TokenNotPermitted as err:
+        plus_required = True
+        rec("P09", "FAIL", err.status, reason="TOKEN_TYPE_NOT_PERMITTED", code=err.code, token_used=expired_token_used)
+    except TokenExpired as err:
+        # v3: 401 here used to crash the probe with no report. Historical-candle V3 calls are served from a
+        # cache without validating the token (Upstox staff, 2026-10-08), so P09 is the first real token check.
+        token_blocked = "NO_TOKEN" if expired_token_used == "none" else "TOKEN_REJECTED"
+        rec("P09", "FAIL", 401, reason=token_blocked, token_used=expired_token_used)
     except (ApiError, RetryExhausted, BudgetExceeded) as err:
         rec("P09", "FAIL", getattr(err, "status", 0), error=str(err))
 
@@ -288,8 +305,8 @@ def run_probe(settings: Settings, client: HttpClient, calendar: Optional[Calenda
     target_exp = None
     sample_exp_contract = None
 
-    if plus_required or not nifty_expiries:
-        reason = "PLUS_REQUIRED" if plus_required else "NO_EXPIRIES"
+    if plus_required or token_blocked or not nifty_expiries:
+        reason = "PLUS_REQUIRED" if plus_required else (token_blocked or "NO_EXPIRIES")
         for pid in ("P10", "P11", "P12", "P13", "P14", "P15", "P16"):
             rec(pid, "UNVERIFIED", 0, reason=reason)
     else:
@@ -403,8 +420,11 @@ def run_probe(settings: Settings, client: HttpClient, calendar: Optional[Calenda
                 analytics_accepted_for_expired = res_a.status == 200
                 rec("P16", "PASS" if analytics_accepted_for_expired else "FAIL", res_a.status,
                     analytics_accepted_for_expired=analytics_accepted_for_expired)
-            except (ApiError, RetryExhausted, BudgetExceeded) as err:
-                rec("P16", "FAIL", getattr(err, "status", 0), analytics_accepted_for_expired=False)
+            except (ApiError, RetryExhausted, BudgetExceeded, TokenExpired) as err:
+                rec("P16", "FAIL", getattr(err, "status", 401), analytics_accepted_for_expired=False,
+                    code=getattr(err, "code", ""))
+        elif expired_token_used == "analytics":
+            rec("P16", "PASS", 200, analytics_accepted_for_expired=True, reason="ONLY_ANALYTICS_TOKEN_USED_IN_P09")
         else:
             rec("P16", "UNVERIFIED", 0, reason="BOTH_TOKENS_NOT_SET")
 
@@ -529,7 +549,9 @@ def run_probe(settings: Settings, client: HttpClient, calendar: Optional[Calenda
     max_warm = max(settings.params["WARMUP_OPTION_TRADING_DAYS_BY_INDEX"].values())
     required_oldest = calendar.shift(settings.test_start, -int(max_warm))
 
-    if plus_required or not p11_passed:
+    if token_blocked:
+        selected_plan = PLAN_BLOCKED_TOKEN
+    elif plus_required or not p11_passed:
         selected_plan = "B" if p08_passed else "C"
     else:
         if option_history_oldest_date and to_date(option_history_oldest_date) <= required_oldest:
@@ -544,12 +566,16 @@ def run_probe(settings: Settings, client: HttpClient, calendar: Optional[Calenda
     elif selected_plan == "C":
         print(PLAN_C)
 
-    return _write_reports(
+    report = _write_reports(
         settings, today, recent_day, selected_plan, tests, client,
         option_history_oldest_date, expired_1m_max_span_days,
         sensex_option_history_available, analytics_accepted_for_expired,
         v3_1m_max_span_days, oi_intraday_varies, oi_last_bar_equals_daily
     )
+    if token_blocked:
+        print(PROBE_TOKEN_BLOCKED)
+        raise TokenExpired(PROBE_TOKEN_BLOCKED)
+    return report
 
 
 def _write_reports(settings: Settings, today: dt.date, recent_day: dt.date, selected_plan: str,
@@ -606,6 +632,8 @@ def _write_reports(settings: Settings, today: dt.date, recent_day: dt.date, sele
         lines.append(PLAN_B)
     elif selected_plan == "C":
         lines.append(PLAN_C)
+    elif selected_plan == PLAN_BLOCKED_TOKEN:
+        lines.append(PROBE_TOKEN_BLOCKED)
     for pid in sorted(tests):
         t = tests[pid]
         lines.append(f"{pid}: {t['status']} (HTTP {t.get('http_status', 0)})")

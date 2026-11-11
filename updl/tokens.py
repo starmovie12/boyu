@@ -33,11 +33,14 @@ class Tokens:
         return [t for t in (self.analytics, self.access) if t]
 
     def for_kind(self, kind: str, analytics_ok_for_expired: bool = False) -> Optional[str]:
-        """kind: 'v3' (candles, masters) or 'expired'."""
+        """kind: 'v3' (candles, masters, option chain) or 'expired'.
+
+        Expired endpoints prefer the daily access token. v3: if only the analytics token exists it is sent
+        too; Upstox staff stated (community, 2026-06-23 and 2026-08-26) that the analytics token of a Plus
+        user works on the expired-instruments APIs, and the server answers with an error code if it does not.
+        `analytics_ok_for_expired` is kept for backward compatibility; it no longer changes the result."""
         if kind == "expired":
-            if self.access:
-                return self.access
-            return self.analytics if analytics_ok_for_expired else None
+            return self.access or self.analytics
         return self.analytics or self.access
 
 
