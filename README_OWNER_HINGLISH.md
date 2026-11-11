@@ -19,7 +19,7 @@ Yeh guide simple Hinglish mein hai. Lines chhoti rakhi hain taaki aap apne Andro
 ## 1. Python 3.11 Install aur Requirements
 Apne PC ya Android Termux par Python 3.11+ install rakho aur virtual environment banao:
 
-Linux / macOS / Termux:
+Linux / macOS:
 ```bash
 python3 -m venv .venv
 source .venv/bin/activate
@@ -33,10 +33,17 @@ python -m venv .venv
 pip install -r requirements.txt
 ```
 
-Termux par agar `pyarrow` ya `scipy` compile hone mein dikkat de, to pehle Termux package chala lo:
+**Android Termux par `pip install -r requirements.txt` MAT chalao.** Termux par numpy/pandas ke wheels nahi hote, pip unhe compile karne lagta hai aur `numpy` ka build `cpow ... complex.h` error ke saath fail ho jata hai. Termux par yeh karo:
 ```bash
-pkg update -y && pkg install -y python python-numpy python-scipy python-pandas tur-repo
+pkg update -y
+pkg install -y python git python-numpy python-scipy python-pandas python-pyarrow
+pip install -r requirements-termux.txt
 ```
+Ya ek hi command mein (yeh upar ke teeno kaam khud kar deta hai):
+```bash
+bash termux_run.sh setup
+```
+Last line `[Termux Setup] OK -> pandas ... | numpy ...` dikhe to sab theek hai.
 
 ## 2. Upstox Tokens aur Security Rules
 * **Analytics Token**: Upstox Developer Apps -> Analytics tab mein jao. Yeh free hai, 1 saal tak chalta hai, aur sirf data padhne (read-only) ke kaam aata hai. Isko `UPSTOX_ANALYTICS_TOKEN` mein set karo.
