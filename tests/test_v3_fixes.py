@@ -34,13 +34,13 @@ class TestFirstSeen(unittest.TestCase):
                 self.assertNotIn("K1", cat.first_seen())
                 # first candle after the requested start: the contract showed nothing earlier -> recorded
                 cat.note_first_seen("K2", "2026-10-15", requested_from="2026-10-12")
-                self.assertEqual(cat.first_seen()["K2"], dt.date(2026, 10, 15))
+                self.assertEqual(cat.first_seen()["K2"], (dt.date(2026, 10, 15), dt.date(2026, 10, 12)))
                 # a later request that finds an earlier candle lowers the record (a candle proves existence)
                 cat.note_first_seen("K2", "2026-10-13", requested_from="2026-10-13")
-                self.assertEqual(cat.first_seen()["K2"], dt.date(2026, 10, 13))
+                self.assertEqual(cat.first_seen()["K2"][0], dt.date(2026, 10, 13))
                 # a later date never raises it
                 cat.note_first_seen("K2", "2026-10-20", requested_from="2026-10-01")
-                self.assertEqual(cat.first_seen()["K2"], dt.date(2026, 10, 13))
+                self.assertEqual(cat.first_seen()["K2"][0], dt.date(2026, 10, 13))
                 # legacy call without requested_from records nothing new
                 cat.note_first_seen("K3", "2026-10-20")
                 self.assertNotIn("K3", cat.first_seen())
@@ -504,3 +504,98 @@ class TestSmallFixes(unittest.TestCase):
         self.assertIn(b"pkg update -y", data)
         if shutil.which("bash"):
             self.assertEqual(subprocess.run(["bash", "-n", str(script)]).returncode, 0)
+
+
+class TestReviewFollowUps(unittest.TestCase):
+    def test_first_seen_hides_only_inside_its_evidence_window(self):
+        from updl.selector import first_seen_hides
+        fs = (dt.date(2026, 10, 20), dt.date(2026, 10, 12))   # requested from 10-12, first candle 10-20
+        self.assertTrue(first_seen_hides(fs, "2026-10-15"))
+        self.assertFalse(first_seen_hides(fs, "2026-10-20"))
+        # an earlier month (continue mode) was never covered by that request: not hidden
+        self.assertFalse(first_seen_hides(fs, "2026-09-25"))
+        # legacy plain date keeps the v2 meaning
+        self.assertTrue(first_seen_hides(dt.date(2026, 6, 10), "2026-06-05"))
+        self.assertFalse(first_seen_hides(None, "2026-06-05"))
+
+    def test_spot_after_index_close_is_flagged_in_export_and_derive(self):
+        from updl.chain import spot_asof_age, spot_flags
+        from updl.store import parse_candles, rows_to_frame
+        from updl.timeutil import IST
+        from tests.test_updl import _make_full_day_candles
+        cal = load_calendar(REF_DIR)
+        d = dt.date(2026, 11, 11)
+        r_s, _ = parse_candles({"data": {"candles": _make_full_day_candles(d, "09:15", "15:30")}})
+        sdf = rows_to_frame(r_s, {"table": "spot_1m", "instrument_key": "NSE_INDEX|Nifty 50", "underlying": "NIFTY",
+                                  "option_type": "SPOT"}, cal, "r1", "0" * 64)
+        (v1, a1), (v2, a2) = spot_asof_age(sdf, [dt.datetime(2026, 11, 11, 15, 30, tzinfo=IST),
+                                                 dt.datetime(2026, 11, 11, 15, 40, tzinfo=IST)])
+        self.assertEqual(spot_flags(a1), (0.0, False))
+        self.assertEqual(v1, v2)
+        self.assertEqual(spot_flags(a2), (10.0, True))
+
+    def test_probe_analytics_only_401_gives_plan_b_not_blocked(self):
+        from updl.tokens import Tokens
+        cal = load_calendar(REF_DIR)
+        with tempfile.TemporaryDirectory() as tmp:
+            settings = load_settings(MANIFEST_PATH, workdir=tmp)
+            tr = _expired_override(_build_fixture_transport("A"), 401, "UDAPI100050")
+            rep = run_probe(settings, _client(tr, Tokens(analytics="dummy_value")), calendar=cal,
+                            probe_today=dt.date(2026, 11, 11))
+            self.assertEqual(rep["selected_plan"], "B")
+            self.assertEqual(rep["tests"]["P09"]["reason"], "ANALYTICS_NOT_ACCEPTED_FOR_EXPIRED")
+
+    def test_plan_with_blocked_token_report_prints_hint(self):
+        import io
+        import json as _json
+        from contextlib import redirect_stdout
+        from updl.messages import PROBE_TOKEN_BLOCKED
+        from updl.plan import run_plan_command
+        with tempfile.TemporaryDirectory() as tmp:
+            s = load_settings(MANIFEST_PATH, workdir=tmp, dry_run=True)
+            s.ensure_dirs()
+            s.probe_json.write_text(_json.dumps({"selected_plan": "BLOCKED_TOKEN"}), encoding="utf-8")
+            buf = io.StringIO()
+            with redirect_stdout(buf):
+                summary = run_plan_command(s, load_calendar(REF_DIR))
+            self.assertIn(PROBE_TOKEN_BLOCKED, buf.getvalue())
+            self.assertEqual(summary["plan"], "A")
+
+    def test_recorder_upper_cases_names_and_stops_early_after_close(self):
+        import io
+        from contextlib import redirect_stdout
+        from updl.recorder import run_record
+        from updl.timeutil import IST
+        cal = load_calendar(REF_DIR)
+        with tempfile.TemporaryDirectory() as tmp:
+            settings = load_settings(MANIFEST_PATH, workdir=tmp)
+            tr = _build_fixture_transport("A")
+            buf = io.StringIO()
+            with redirect_stdout(buf):
+                res = run_record(settings, _client(tr), calendar=cal, underlyings=["nifty", "xyz"],
+                                 now_fn=lambda: dt.datetime(2026, 11, 12, 16, 0, tzinfo=IST), sleep=lambda s: None)
+            self.assertIn("XYZ", buf.getvalue())
+            self.assertEqual(res["reason"], "AFTER_CLOSE")
+            self.assertEqual(tr.requests, [])          # nothing downloaded after the close
+
+    def test_termux_venv_check_detects_python_minor_upgrade(self):
+        import shutil
+        import subprocess
+        if not shutil.which("bash") or not shutil.which("python3"):
+            self.skipTest("bash/python3 not available")
+        script = Path(__file__).resolve().parent.parent / "termux_run.sh"
+        fn = subprocess.run(["sed", "-n", "/^venv_ok()/,/^}/p", str(script)], capture_output=True, text=True).stdout
+        sys_v = subprocess.run(["python3", "-c", "import sys; print('%d.%d' % sys.version_info[:2])"],
+                               capture_output=True, text=True).stdout.strip()
+        with tempfile.TemporaryDirectory() as tmp:
+            venv = Path(tmp) / ".venv"
+            (venv / "bin").mkdir(parents=True)
+            (venv / "bin" / "python3").symlink_to(shutil.which("python3"))   # unversioned, like Termux
+            def check(cfg_version, lib_version):
+                (venv / "pyvenv.cfg").write_text(f"home = /x\nversion = {cfg_version}\n")
+                for old in (venv / "lib").glob("python*") if (venv / "lib").exists() else []:
+                    old.rmdir()
+                (venv / "lib" / f"python{lib_version}").mkdir(parents=True, exist_ok=True)
+                return subprocess.run(["bash", "-c", fn + "\nvenv_ok"], cwd=tmp).returncode == 0
+            self.assertTrue(check(sys_v + ".1", sys_v))
+            self.assertFalse(check("3.9.18", "3.9"))   # venv built for an older Python: must be rebuilt

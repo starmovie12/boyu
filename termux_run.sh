@@ -29,14 +29,15 @@ need_python() {
     fi
 }
 
-# A Termux `pkg upgrade` can move Python to a new minor version (3.13 -> 3.14). The old .venv then points
-# to a Python that no longer exists, so it is rebuilt (pip packages are reinstalled by `setup`).
+# A Termux `pkg upgrade` can move Python to a new minor version (3.13 -> 3.14). .venv/bin/python3 is a
+# symlink to the unversioned python3, so asking it for its version always shows the NEW version; the venv's
+# own record (pyvenv.cfg "version =") and its lib/pythonX.Y folder still belong to the OLD one. Compare those.
 venv_ok() {
-    [ -x ".venv/bin/python3" ] || return 1
-    local sys_v venv_v
+    [ -x ".venv/bin/python3" ] && [ -f ".venv/pyvenv.cfg" ] || return 1
+    local sys_v cfg_v
     sys_v="$(python3 -c 'import sys; print("%d.%d" % sys.version_info[:2])')"
-    venv_v="$(.venv/bin/python3 -c 'import sys; print("%d.%d" % sys.version_info[:2])' 2>/dev/null || true)"
-    [ "$sys_v" = "$venv_v" ]
+    cfg_v="$(sed -n 's/^version[_info]* *= *\([0-9]*\.[0-9]*\).*/\1/p' .venv/pyvenv.cfg | head -n 1)"
+    [ "$sys_v" = "$cfg_v" ] && [ -d ".venv/lib/python$sys_v" ]
 }
 
 ensure_venv() {
@@ -64,21 +65,24 @@ shift || true
 
 case "$ACTION" in
     setup)
-        ensure_venv
-        PYTHON_BIN=".venv/bin/python3"
-        say "[Termux Setup] Environment ready: $($PYTHON_BIN --version)"
         if [ "$IS_TERMUX" -eq 1 ]; then
             # Termux: numpy/pandas/scipy/pyarrow ko pip se compile mat karo (numpy build fail hota hai).
             # Termux ke ready-made packages lo, baaki pure-Python cheezein pip se.
+            # pkg pehle: pkg install khud Python ko naye version par le ja sakta hai, .venv uske BAAD banta hai.
             say "[Termux Setup] pkg update + numpy, pandas, scipy, pyarrow install ho rahe hain..."
             pkg update -y || say "[Termux Setup] pkg update fail hua; phir bhi aage try kar raha hoon."
-            if ! pkg install -y python-numpy python-scipy python-pandas python-pyarrow; then
+            if ! pkg install -y python python-numpy python-scipy python-pandas python-pyarrow; then
                 say "[Termux Setup] pkg install fail hua."
                 say "  Google Play wale Termux ke repo mein python-pandas nahi hai."
                 say "  F-Droid ya GitHub wala Termux use karo (Play wala Termux uninstall karke)."
                 say "  Ya: pkg update -y && pkg upgrade -y, phir dobara: bash termux_run.sh setup"
                 exit 1
             fi
+        fi
+        ensure_venv
+        PYTHON_BIN=".venv/bin/python3"
+        say "[Termux Setup] Environment ready: $($PYTHON_BIN --version)"
+        if [ "$IS_TERMUX" -eq 1 ]; then
             "$PYTHON_BIN" -m pip install -r requirements-termux.txt
             if [ ! -d "$HOME/storage" ]; then
                 say "[Termux Setup] Phone Download folder ke liye ek baar chalao: termux-setup-storage (Allow dabana)"

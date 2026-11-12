@@ -28,7 +28,7 @@ import pandas as pd
 from scipy.optimize import brentq
 from scipy.stats import norm
 
-from .chain import asof_chain, chain_metrics, spot_asof
+from .chain import asof_chain, chain_metrics, spot_asof_age, spot_flags
 from .config import Settings, load_yaml
 from .selector import strike_step
 from .sessions import Calendar, load_calendar
@@ -328,7 +328,8 @@ def run_derive(settings: Settings, calendar: Optional[Calendar] = None) -> dict:
             # v3 (no look-ahead): the spot used for minute T is the last spot candle closed at or before T.
             # Before, a missing spot minute fell back to the day's LAST close (a value from the future).
             minute_ts = sorted(set(odf["ts_open"]))
-            spot_known = dict(zip(minute_ts, spot_asof(sdf, [t + dt.timedelta(minutes=1) for t in minute_ts])))
+            spot_pairs = dict(zip(minute_ts, spot_asof_age(sdf, [t + dt.timedelta(minutes=1) for t in minute_ts])))
+            spot_known = {k: v[0] for k, v in spot_pairs.items()}
             # Chain "as of" each minute close: OI and prices carried from older candles are flagged, never 0.
             snap_all = asof_chain(odf, [t + dt.timedelta(minutes=1) for t in minute_ts])
             snap_groups = {k: g for k, g in snap_all.groupby(["snapshot_ts", "expiry_date"], sort=False)}
@@ -342,6 +343,8 @@ def run_derive(settings: Settings, calendar: Optional[Calendar] = None) -> dict:
                 exp_d = to_date(exp_raw)
                 ts_c = ts_o + dt.timedelta(minutes=1)
                 spot_c = spot_known.get(ts_o, float("nan"))
+                # v3.1 (Rule 4): flag a carried spot (index closes 15:30, F&O trades on to 15:40)
+                spot_age, spot_filled = spot_flags(spot_pairs.get(ts_o, (np.nan, np.nan))[1])
                 settle_dt = _settlement_time_ist(exp_d, iv_cfg)
                 t_mins = max(1.0, (settle_dt - ts_c).total_seconds() / 60.0)
                 T_yrs = t_mins / mins_per_yr
@@ -453,6 +456,7 @@ def run_derive(settings: Settings, calendar: Optional[Calendar] = None) -> dict:
                             "strike": k_val, "option_type": ot,
                             "moneyness_bucket": m_bkt, "dte_bucket": dte_bkt,
                             "close": opt_c, "v": opt_v, "oi": opt_oi, "is_stale": opt_stale,
+                            "spot_asof_DERIVED": spot_c, "spot_age_min": spot_age, "spot_is_filled": spot_filled,
                             "forward_DERIVED": F_val, "forward_source": fwd_source,
                             "iv_DERIVED": iv_res["iv_DERIVED"],
                             "delta_DERIVED": iv_res["delta_DERIVED"],
@@ -486,6 +490,7 @@ def run_derive(settings: Settings, calendar: Optional[Calendar] = None) -> dict:
                     "n_oi_known_DERIVED": met["n_oi_known"],
                     "n_oi_carried_DERIVED": met["n_oi_carried"],
                     "gex_proxy_PROXY": gex_total,
+                    "spot_asof_DERIVED": spot_c, "spot_age_min": spot_age, "spot_is_filled": spot_filled,
                     "available_from_ts": ts_c,
                 })
 

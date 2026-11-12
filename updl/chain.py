@@ -155,16 +155,32 @@ def chain_metrics(snap: pd.DataFrame, spot: Optional[float] = None) -> dict:
     }
 
 
-def spot_asof(spot_df: pd.DataFrame, times: Iterable) -> list:
-    """Spot close known at each time T (last 1-minute spot candle with ts_close <= T); NaN if none yet."""
+def spot_asof_age(spot_df: pd.DataFrame, times: Iterable) -> list:
+    """(spot close, age in minutes) known at each time T: last 1-minute spot candle with ts_close <= T.
+    (NaN, NaN) if none yet. Age >= 1 means the value is carried (e.g. index closes 15:30 while F&O trades on)."""
     times = list(times)
     if spot_df is None or spot_df.empty or not times:
-        return [float("nan")] * len(times)
+        return [(float("nan"), float("nan"))] * len(times)
     s = spot_df.assign(_tc=_to_ns(spot_df["ts_close"])).sort_values("_tc")
     tc = s["_tc"].to_numpy()
     c = _nullable_float(s["c"])
-    idx = np.searchsorted(tc, _to_ns(times), side="right") - 1
-    return [float(c[i]) if i >= 0 else float("nan") for i in idx]
+    t_ns = _to_ns(times)
+    idx = np.searchsorted(tc, t_ns, side="right") - 1
+    one_min = 60 * 10**9
+    return [(float(c[i]), round((int(t_ns[j]) - int(tc[i])) / one_min, 3)) if i >= 0 else
+            (float("nan"), float("nan")) for j, i in enumerate(idx)]
+
+
+def spot_asof(spot_df: pd.DataFrame, times: Iterable) -> list:
+    """Spot close known at each time T (last 1-minute spot candle with ts_close <= T); NaN if none yet."""
+    return [v for v, _ in spot_asof_age(spot_df, times)]
+
+
+def spot_flags(age_min: float) -> tuple:
+    """(age_min, is_filled) for output columns; is_filled is None when no spot is known yet."""
+    if age_min is None or (isinstance(age_min, float) and np.isnan(age_min)):
+        return float("nan"), None
+    return age_min, bool(age_min >= 1.0)
 
 
 def snapshot_times(day: dt.date, open_hhmm: str, close_hhmm: str, every_min: int) -> list:

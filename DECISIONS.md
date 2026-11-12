@@ -33,3 +33,5 @@
 14. **Compaction order** uses the state's `fetched_utc` (sortable) instead of `rHHMMSS` run ids; run ids stay short for the 40-character rule.
 15. **Manifest unchanged**: `data_manifest.yaml` still equals the manifest embedded in PROMPT_02 (rate 30/min, 900 per 30 min). The program never raises the rate; the README tells the owner that `--rate 60` is inside the documented 500/min and 2000/30 min.
 16. **Phone copies** use `shutil.copyfile` (not `copy2`) and print a `termux-setup-storage` hint on failure. `continue` refreshes a missing or 7-day-old probe report itself.
+17. **v3.1 first-seen window**: the catalog keeps `(first_date, evidence_from)`; a contract is skipped only on days inside `[evidence_from, first_date)`, the range a request covered without any candle. Earlier days stay selectable (the backwards `continue` mode needs this for illiquid strikes of monthly contracts).
+18. **v3.1 spot flags**: every derived/exported row that uses the spot carries `spot_age_min` and `spot_is_filled` (the index stops at 15:30 while F&O trades on; Rule 4).

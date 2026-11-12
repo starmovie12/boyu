@@ -30,6 +30,10 @@ class ProbeMissing(UpdlError):
     exit_code = EXIT_PROBE_MISSING
 
 
+class ProbeTokenBlocked(ProbeMissing):
+    """probe_report.json exists but its plan is BLOCKED_TOKEN (token missing or rejected): fix the token first."""
+
+
 class RightsNotAllowed(UpdlError):
     exit_code = EXIT_RIGHTS_NOT_ALLOWED
 

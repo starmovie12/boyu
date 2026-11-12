@@ -199,7 +199,10 @@ class Catalog:
         row = self.db.execute("SELECT first_date FROM first_seen_v3 WHERE instrument_key=?", (key,)).fetchone()
         if row is not None:
             if d < row[0]:
-                self.db.execute("UPDATE first_seen_v3 SET first_date=? WHERE instrument_key=?", (d, key))
+                # the new evidence window is the new request's start up to the earlier candle (may be empty)
+                ev = frm if (frm is not None and frm < d) else d
+                self.db.execute("UPDATE first_seen_v3 SET first_date=?, evidence_from=? WHERE instrument_key=?",
+                                (d, ev, key))
                 self.db.commit()
             return
         if frm is not None and d > frm:
@@ -207,8 +210,9 @@ class Catalog:
             self.db.commit()
 
     def first_seen(self) -> dict:
-        return {k: dt.date.fromisoformat(v)
-                for k, v in self.db.execute("SELECT instrument_key, first_date FROM first_seen_v3")}
+        """{instrument_key: (first_date, evidence_from)}; see selector.first_seen_hides."""
+        return {k: (dt.date.fromisoformat(v), dt.date.fromisoformat(e) if e else None)
+                for k, v, e in self.db.execute("SELECT instrument_key, first_date, evidence_from FROM first_seen_v3")}
 
     def set_kv(self, k, v):
         self.db.execute("INSERT OR REPLACE INTO kv VALUES(?,?)", (k, str(v)))

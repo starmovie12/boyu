@@ -25,7 +25,7 @@ from typing import Optional
 from .client import HttpClient
 from .config import Settings
 from .derive import run_derive
-from .errors import ProbeMissing
+from .errors import ProbeMissing, ProbeTokenBlocked
 from .export import DEFAULT_EVERY_MIN, copy_to_phone, run_export
 from .plan import run_download
 from .probe import check_probe_fresh, run_probe
@@ -199,9 +199,9 @@ def run_monthly_continue(settings: Settings, client: HttpClient, calendar: Optio
     if not settings.dry_run:
         try:
             check_probe_fresh(settings, secrets=secrets)
-        except ProbeMissing as err:
-            if "token" in (err.message or "").lower():
-                raise
+        except ProbeTokenBlocked:
+            raise
+        except ProbeMissing:
             # v3: the probe report is valid for 7 days; a month-by-month run spans weeks. Re-run it here
             # (at most 40 calls) instead of stopping the owner with exit 30.
             print("[Termux Continue] probe_report purana ya missing hai. Pehle probe chala raha hoon (max 40 calls)...")

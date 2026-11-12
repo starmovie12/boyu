@@ -55,6 +55,20 @@ def strike_step(strikes: Iterable, default: float) -> float:
     return min(diffs) if diffs else float(default)
 
 
+def first_seen_hides(fs, day) -> bool:
+    """True when a contract must not be selected on `day` because it showed no candle then.
+    fs is a date (first seen: hide every earlier day) or, from the catalog, (first_date, evidence_from):
+    hide only days inside [evidence_from, first_date), the range a request actually covered without a
+    candle. Days before evidence_from are unknown (for example an earlier month in `continue` mode)."""
+    if fs is None:
+        return False
+    day = to_date(day)
+    if isinstance(fs, tuple):
+        first, ev = fs
+        return (ev is None or to_date(ev) <= day) and day < to_date(first)
+    return day < to_date(fs)
+
+
 # ---- delta-aware strike band -----------------------------------------------------------------------------------
 def band_margin_points(step: float, spot_close: float, vix_day_high: float, cal_dte: float,
                        margin_steps: float, delta_k: float, min_steps: Optional[float] = None) -> float:
@@ -101,8 +115,7 @@ def select_day_options(day, underlying_expiries: Iterable, contracts_by_expiry: 
                 continue
             if listed_only and c.source != "listed":
                 continue
-            fs = first_seen.get(c.instrument_key)
-            if fs is not None and fs > day:
+            if first_seen_hides(first_seen.get(c.instrument_key), day):
                 continue
             chosen.append(c)
     return chosen
