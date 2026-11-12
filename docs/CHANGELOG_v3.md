@@ -27,10 +27,19 @@ Seedha saar (Hinglish): Expired weekly options ka data Upstox sirf Plus par deta
 
 ## D. Tests
 * Baseline v2: `python -m pytest -q` -> 22 passed, 1 failed (T15, root-only test bug); plain `pytest -q` -> import error.
-* v3: T15 fixed (same check, correct for root and Windows); `pytest.ini` added; new file `tests/test_v3_fixes.py`. See the PR for the exact final counts.
+* v3 (PR #1, merged): `python -m pytest -q` and `pytest -q` -> 42 passed. T15 fixed (same check, correct for root and Windows); `pytest.ini` added; new file `tests/test_v3_fixes.py`.
+* v3.1 (review follow-up): 48 passed.
 
 ## E. Abhi bhi open (aapke haath mein ya live token chahiye)
 1. Plus active karna (brokerage Rs 30/order while on Plus) aur probe chalana: asli depth, span, BSE support sirf probe batayega.
 2. Real Termux phone par setup/continue/record: NOT RUN by me (cloud sandbox).
 3. DATA_RIGHTS: Upstox se likhit jawab.
 4. N01-N05 in AUDIT_FINDINGS (bisection, band-contract zero-row check, gamma flip/skew/vix term, run-id collision, last day after 18:00).
+
+## F. v3.1 (independent review ke baad)
+* Termux: Python upgrade ke baad purana `.venv` ab sahi pakda jata hai (`pyvenv.cfg` se) aur `setup` pehle `pkg install`, phir `.venv` banata hai.
+* Export / derive: 15:30 ke baad (index band, F&O chalu) spot purani candle ka hota hai: ab `spot_age_min` aur `spot_is_filled` column batate hain.
+* Sirf Analytics token + 401 -> ab Plan B (pehle BLOCKED_TOKEN).
+* `continue` mode: illiquid contract pichhle mahine mein ab chhupta nahi (first-seen sirf usi range mein lagta hai jo request ne dekhi).
+* Recorder: `--underlyings nifty` (chhote akshar) chalta hai; market band hone ke baad kuch download nahi karta.
+* Details: docs/AUDIT_FINDINGS.md, rows R1-R7, N09.

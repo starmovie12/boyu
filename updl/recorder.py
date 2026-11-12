@@ -111,12 +111,26 @@ def run_record(settings: Settings, client: HttpClient, calendar: Optional[Calend
     """Record live option-chain snapshots until the session close (or `until` HH:MM IST, or Ctrl+C)."""
     log = log or (lambda *a, **k: None)
     calendar = calendar or load_calendar(settings.reference_dir)
-    unds = [u for u in (underlyings or settings.instrument_names()) if u in settings.instruments]
+    known = settings.instrument_names()
+    wanted = [str(u).strip().upper() for u in (underlyings or known)]
+    unknown = [u for u in wanted if u not in known]
+    if unknown:
+        print(f"Recorder: yeh naam nahi mile: {', '.join(unknown)}. Sahi naam: {', '.join(known)}")
+    unds = [u for u in wanted if u in known]
+    if not unds:
+        return {"snapshots": 0, "rows": 0, "reason": "NO_UNDERLYING"}
     now = now_fn()
     today = now.date()
     if not once and not calendar.is_trading_day(today):
         print("Aaj market band hai (weekend/holiday). Recorder trading din par market time mein chalao.")
         return {"snapshots": 0, "rows": 0, "reason": "NOT_A_TRADING_DAY"}
+    if not once:
+        closes = [calendar.session_times(instrument_class("option", u, exchange=settings.exchange_of(u)), today)[1]
+                  for u in unds]
+        closes = [at_ist(today, c) for c in closes if c]
+        if closes and now >= max(closes):
+            print("Aaj ka market band ho chuka hai. Recorder kal market time mein chalao.")
+            return {"snapshots": 0, "rows": 0, "reason": "AFTER_CLOSE"}
 
     masters = _masters(settings, client, today)
     plan = []

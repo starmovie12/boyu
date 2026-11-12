@@ -19,7 +19,7 @@ from typing import Optional
 
 import pandas as pd
 
-from .chain import asof_chain, chain_metrics, snapshot_times, spot_asof
+from .chain import asof_chain, chain_metrics, snapshot_times, spot_asof_age, spot_flags
 from .config import Settings
 from .sessions import Calendar, instrument_class, load_calendar
 from .store import date_of_part, list_parts, part_path, partition_of, read_parquet
@@ -46,6 +46,8 @@ time            IST time T (HH:MM). Sirf woh candles jo T tak band ho chuki thi.
 expiry_date     contract expiry (YYYY-MM-DD)
 strike          strike price
 spot_asof       index ka last 1-minute close jo T tak pata tha (khali = abhi tak nahi)
+spot_age_min    spot value kitne minute purani hai (index 15:30 par band hota hai, F&O 15:40 tak)
+spot_is_filled  true = spot purani candle se aage laaya gaya
 ce_close        CE ka last traded close (T ya usse pehle)
 ce_vol_1m       CE volume us minute ka jo T par khatam hua (khali = us minute trade nahi hua)
 ce_vol_cum      CE ka din bhar ka volume T tak (units/quantity, lots nahi)
@@ -57,7 +59,7 @@ Khali cell = data nahi tha. Kabhi bhi 0 se nahi bhara gaya.
 
 summary_*.csv columns
 ---------------------
-time, expiry_date, spot_asof
+time, expiry_date, spot_asof, spot_age_min, spot_is_filled
 pcr             put OI / call OI (sirf downloaded strikes ka band, poori exchange chain nahi)
 call_oi_wall    spot ke upar sabse zyada CE OI wala strike
 put_oi_wall     spot ke neeche sabse zyada PE OI wala strike
@@ -105,18 +107,26 @@ def export_day(settings: Settings, calendar: Calendar, und: str, d: dt.date,
     times = snapshot_times(d, o_hhmm, c_hhmm, every_min)
     sp = part_path(settings.store_dir, partition_of(d, settings.holdout_start), "spot_1m", und, d)
     spot_df = read_parquet(sp) if sp.exists() else pd.DataFrame()
-    spots = {pd.Timestamp(t): v for t, v in zip(times, spot_asof(spot_df, times))}
+    spot_info = {pd.Timestamp(t): va for t, va in zip(times, spot_asof_age(spot_df, times))}
+    spots = {k: va[0] for k, va in spot_info.items()}
+    nan_pair = (float("nan"), float("nan"))
 
     snap = asof_chain(odf, times)
     if snap.empty:
         return pd.DataFrame(), pd.DataFrame()
     snap.insert(0, "time", [_fmt_time(t) for t in snap["snapshot_ts"]])
     snap.insert(3, "spot_asof", [spots.get(pd.Timestamp(t), float("nan")) for t in snap["snapshot_ts"]])
+    # v3.1 (Rule 4): the index stops at 15:30 while F&O trades to 15:40, so late rows carry an older spot
+    flags = [spot_flags(spot_info.get(pd.Timestamp(t), nan_pair)[1]) for t in snap["snapshot_ts"]]
+    snap.insert(4, "spot_age_min", [f[0] for f in flags])
+    snap.insert(5, "spot_is_filled", [f[1] for f in flags])
     summary = []
     for (ts, exp), g in snap.groupby(["snapshot_ts", "expiry_date"], sort=True):
         spot = spots.get(pd.Timestamp(ts), float("nan"))
+        s_age, s_filled = spot_flags(spot_info.get(pd.Timestamp(ts), nan_pair)[1])
         met = chain_metrics(g, None if pd.isna(spot) else spot)
         summary.append({"time": _fmt_time(ts), "expiry_date": iso(exp), "spot_asof": spot,
+                        "spot_age_min": s_age, "spot_is_filled": s_filled,
                         "pcr": met["pcr"], "call_oi_wall": met["call_oi_wall"],
                         "put_oi_wall": met["put_oi_wall"], "max_pain": met["max_pain"],
                         "n_strikes": met["n_strikes"], "n_oi_known": met["n_oi_known"],

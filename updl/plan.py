@@ -20,15 +20,15 @@ from typing import Optional
 import pandas as pd
 
 from .client import MASTER_URLS, HttpClient, expired_candle_path, v3_candle_path
-from .config import ITEM_ORDER, Settings, load_yaml
+from .config import ITEM_ORDER, PLANS, Settings, load_yaml
 from .errors import (ApiError, BudgetExceeded, PlusRequired, RetryExhausted, RightsNotAllowed,
                      TokenExpired)
 from .master import (equity_key, find_global, fo_underlying_symbols, listed_contracts,
                      parse_master_bytes, resolve_spot_key)
-from .messages import (CTRL_C, DATA_RIGHTS_WARNING, PLAN_A_PARTIAL, PLAN_B, PLAN_C,
+from .messages import (CTRL_C, DATA_RIGHTS_WARNING, PLAN_A_PARTIAL, PLAN_B, PLAN_C, PROBE_TOKEN_BLOCKED,
                        RIGHTS_NOT_ALLOWED, TOKEN_EXPIRED)
 from .probe import check_probe_fresh
-from .selector import (Contract, DayStats, chunk_days, contract_chunks,
+from .selector import (Contract, DayStats, chunk_days, contract_chunks, first_seen_hides,
                        futures_expiries_for_day, monthly_expiries, select_day_options)
 from .sessions import Calendar, load_calendar
 from .state import (DONE, EMPTY_OK, FAILED_PERMANENT, FAILED_RETRYABLE, Catalog,
@@ -138,6 +138,10 @@ def _effective_plan(settings: Settings, probe_data: Optional[dict]) -> str:
         print(f"WARNING: plan override active ({settings.plan_override})")
         return settings.plan_override
     if probe_data and probe_data.get("selected_plan"):
+        if probe_data["selected_plan"] not in PLANS:
+            # v3.1: BLOCKED_TOKEN report -> say so; estimate with plan A (download refuses anyway)
+            print(PROBE_TOKEN_BLOCKED)
+            return "A"
         return probe_data["selected_plan"]
     return "A"
 
@@ -427,8 +431,7 @@ def build_selection_plan(settings: Settings, calendar: Optional[Calendar] = None
                                 for c in by_exp.get(e, []):
                                     if listed_only and c.source != "listed":
                                         continue
-                                    fs = first_seen.get(c.instrument_key)
-                                    if fs is not None and fs > d:
+                                    if first_seen_hides(first_seen.get(c.instrument_key), d):
                                         continue
                                     selected_days_by_contract[c.instrument_key].append(d)
                                     contract_obj[c.instrument_key] = c

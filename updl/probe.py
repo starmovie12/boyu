@@ -12,8 +12,8 @@ from typing import Optional
 from .client import MASTER_URLS, HttpClient, expired_candle_path, v3_candle_path
 from .config import Settings
 from .config import PLANS
-from .errors import (AmbiguousKey, ApiError, BudgetExceeded, PlusRequired, ProbeMissing, RetryExhausted,
-                     RightsNotAllowed, TokenExpired, TokenNotPermitted)
+from .errors import (AmbiguousKey, ApiError, BudgetExceeded, PlusRequired, ProbeMissing, ProbeTokenBlocked,
+                     RetryExhausted, RightsNotAllowed, TokenExpired, TokenNotPermitted)
 from .master import (equity_key, find_global, listed_contracts, parse_master_bytes, resolve_spot_key,
                      search_global)
 from .messages import (DATA_RIGHTS_WARNING, PLAN_A_PARTIAL, PLAN_B, PLAN_C, PROBE_MISSING,
@@ -78,7 +78,7 @@ def check_probe_fresh(settings: Settings, secrets=()) -> dict:
         if age_days > 7.0:
             raise ProbeMissing(PROBE_MISSING)
         if data.get("selected_plan") not in PLANS:
-            raise ProbeMissing(PROBE_TOKEN_BLOCKED)
+            raise ProbeTokenBlocked(PROBE_TOKEN_BLOCKED)
         return data
     except ProbeMissing:
         raise
@@ -296,8 +296,16 @@ def run_probe(settings: Settings, client: HttpClient, calendar: Optional[Calenda
     except TokenExpired as err:
         # v3: 401 here used to crash the probe with no report. Historical-candle V3 calls are served from a
         # cache without validating the token (Upstox staff, 2026-10-08), so P09 is the first real token check.
-        token_blocked = "NO_TOKEN" if expired_token_used == "none" else "TOKEN_REJECTED"
-        rec("P09", "FAIL", 401, reason=token_blocked, token_used=expired_token_used)
+        if expired_token_used == "analytics":
+            # v3.1: only the analytics token was tried. A plain 401 means "not accepted for expired data"
+            # (no Plus, or this token type refused); V3 data may still work, so this is Plan B, not a stop.
+            plus_required = True
+            rec("P09", "FAIL", 401, reason="ANALYTICS_NOT_ACCEPTED_FOR_EXPIRED", token_used=expired_token_used)
+            print("Analytics token expired data ke liye accept nahi hua (Plus nahi, ya token galat/purana). "
+                  "Plan B. Plus hai to daily access token bhi set karke probe dobara chalao.")
+        else:
+            token_blocked = "NO_TOKEN" if expired_token_used == "none" else "TOKEN_REJECTED"
+            rec("P09", "FAIL", 401, reason=token_blocked, token_used=expired_token_used)
     except (ApiError, RetryExhausted, BudgetExceeded) as err:
         rec("P09", "FAIL", getattr(err, "status", 0), error=str(err))
 
