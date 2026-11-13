@@ -77,7 +77,7 @@ class State:
         row = self.db.execute("SELECT COALESCE(SUM(attempts), 0) FROM chunk_status").fetchone()
         return int(row[0])
 
-    def chunks(self, status=None, item_id=None) -> list:
+    def chunks(self, status=None, item_id=None, since_utc=None) -> list:
         q, args = "SELECT item_id, instrument_key, from_date, to_date, status, raw_path, sha256, fetch_run_id, " \
                   "table_name, underlying, fetched_utc, error FROM chunk_status WHERE 1=1", []
         if status:
@@ -87,6 +87,9 @@ class State:
         if item_id:
             q += " AND item_id=?"
             args.append(item_id)
+        if since_utc:                       # only chunks fetched at or after this UTC stamp (week mode)
+            q += " AND fetched_utc>=?"
+            args.append(since_utc)
         cols = ["item_id", "instrument_key", "from_date", "to_date", "status", "raw_path", "sha256", "fetch_run_id",
                 "table_name", "underlying", "fetched_utc", "error"]
         rows = [dict(zip(cols, r)) for r in self.db.execute(q, args)]

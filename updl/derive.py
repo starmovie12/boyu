@@ -19,8 +19,6 @@ from __future__ import annotations
 
 import datetime as dt
 import math
-from collections import defaultdict
-from pathlib import Path
 from typing import Optional
 
 import numpy as np
@@ -28,8 +26,9 @@ import pandas as pd
 from scipy.optimize import brentq
 from scipy.stats import norm
 
-from .chain import asof_chain, chain_metrics, spot_asof_age, spot_flags
+from .chain import _to_ns, metrics_matrix, oi_matrices, spot_asof_age
 from .config import Settings, load_yaml
+from .ivfast import greeks_vec, solve_iv_vec
 from .selector import strike_step
 from .sessions import Calendar, load_calendar
 from .store import (TABLE_METADATA, date_of_part, list_parts, part_path, partition_of,
@@ -231,53 +230,260 @@ def compute_rv20_for_day(spot_daily_df: pd.DataFrame, target_day: dt.date, calen
     return rows
 
 
-def run_derive(settings: Settings, calendar: Optional[Calendar] = None) -> dict:
-    """Derive all Stage 3 tables across dev and holdout in strict date sequence without look-ahead."""
+HIST_KEY3 = ["hhmm", "ot", "m_bkt"]
+HIST_KEY4 = HIST_KEY3 + ["dte_bkt"]
+HIST_COLS = HIST_KEY4 + ["v"]
+OPTION_TABLES = ("opt_1m", "opt_wide_1m")
+
+
+def _empty_hist() -> pd.DataFrame:
+    return pd.DataFrame({"hhmm": pd.Series(dtype=object), "ot": pd.Series(dtype=object),
+                         "m_bkt": pd.Series(dtype=float), "dte_bkt": pd.Series(dtype=object),
+                         "v": pd.Series(dtype=float)})
+
+
+def _trim_hist(hist: pd.DataFrame) -> pd.DataFrame:
+    """Keep the last 5 entries per (minute, side, moneyness bucket, DTE bucket): enough for both baselines."""
+    return hist.groupby(HIST_KEY4, sort=False).tail(5) if len(hist) else hist
+
+
+def _baselines(hist: pd.DataFrame, keys: pd.DataFrame, is_monthly: bool):
+    """Section 9.6 volume baselines for today's rows from EARLIER days only (hist never holds today)."""
+    n = len(keys)
+    cnt_a, mean_a = np.zeros(n), np.full(n, np.nan)
+    cnt_s, mean_s = np.zeros(n), np.full(n, np.nan)
+    if len(hist):
+        any5 = hist.groupby(HIST_KEY3, sort=False).tail(5).groupby(HIST_KEY3, sort=False)["v"] \
+            .agg(["count", "mean"]).reset_index()
+        same5 = hist.groupby(HIST_KEY4, sort=False)["v"].agg(["count", "mean"]).reset_index()
+        ma = keys[HIST_KEY3].merge(any5, how="left", on=HIST_KEY3)
+        ms = keys[HIST_KEY4].merge(same5, how="left", on=HIST_KEY4)
+        cnt_a, mean_a = ma["count"].fillna(0).to_numpy(), ma["mean"].to_numpy(dtype=float)
+        cnt_s, mean_s = ms["count"].fillna(0).to_numpy(), ms["mean"].to_numpy(dtype=float)
+    ok_a, ok_s = cnt_a >= 5, cnt_s >= 5
+    st_any = np.where(ok_a, "OK", "INSUFFICIENT_HISTORY").astype(object)
+    st_same = np.where(ok_s, "OK", "INSUFFICIENT_HISTORY").astype(object)
+    if is_monthly:
+        st_same[(keys["dte_bkt"].to_numpy() == "0") & (cnt_s == 0)] = "NO_HISTORY"
+    return np.where(ok_a, mean_a, np.nan), st_any, np.where(ok_s, mean_s, np.nan), st_same
+
+
+def read_option_day(settings: Settings, part_name: str, und: str, d: dt.date) -> pd.DataFrame:
+    """Band (opt_1m) plus wide chain (opt_wide_1m) of one underlying-day; a contract-minute appears once.
+    v4: the downloader no longer fetches a contract-day twice, so the two tables complement each other."""
+    frames = []
+    for tbl in OPTION_TABLES:
+        p = part_path(settings.store_dir, part_name, tbl, und, d)
+        if p.exists():
+            frames.append(read_parquet(p))
+    if not frames:
+        return pd.DataFrame()
+    if len(frames) == 1:
+        return frames[0]
+    return pd.concat(frames, ignore_index=True).drop_duplicates(["instrument_key", "ts_open"], keep="last")
+
+
+def _derive_option_day(und: str, d: dt.date, odf: pd.DataFrame, sdf: pd.DataFrame, calendar: Calendar,
+                       iv_cfg: dict, default_step: float, is_monthly: bool, hist: pd.DataFrame, consts: tuple):
+    """Chain, IV/greeks, baselines, fill assumptions and chain metrics for one underlying-day, on whole
+    columns (v4; the v3 code looped over every row). Returns (chain, iv, metrics, day_hist) or None."""
+    r_rate, q_yield, mins_per_yr, iv_bounds, tick_sz = consts
+    odf = odf[odf["option_type"].isin(["CE", "PE"]) & odf["strike"].notna()].copy()
+    if odf.empty:
+        return None
+    odf["ts_open"] = pd.to_datetime(odf["ts_open"]).dt.tz_convert(IST)
+    odf = odf.sort_values(["ts_open", "expiry_date", "strike", "option_type"], kind="stable").reset_index(drop=True)
+    ts_open = odf["ts_open"]
+    ts_close = ts_open + pd.Timedelta(minutes=1)
+    tc_ns = _to_ns(ts_close)
+    grp = odf.groupby(["ts_open", "expiry_date"], sort=True).ngroup().to_numpy()     # one id per (minute, expiry)
+    n_g = int(grp.max()) + 1
+    first_idx = np.unique(grp, return_index=True)[1]
+
+    exp_codes, exp_uniques = pd.factorize(odf["expiry_date"])
+    exp_dates = np.array([to_date(e) for e in exp_uniques], dtype=object)
+    settle_ns = np.array([pd.Timestamp(_settlement_time_ist(e, iv_cfg)).tz_convert("UTC").value for e in exp_dates])
+    is_td = 1 if calendar.is_trading_day(d) else 0
+    dte_names = np.array([dte_bucket_name(max(0, calendar.count_trading_days(d, e) - is_td)) for e in exp_dates],
+                         dtype=object)
+    T = np.maximum(1.0, (settle_ns[exp_codes] - tc_ns) / 60e9) / mins_per_yr
+    dte_row = dte_names[exp_codes]
+
+    # spot known at each minute close (no look-ahead); a carried spot is flagged (Rule 4)
+    u_ns, inv = np.unique(tc_ns, return_inverse=True)
+    u_times = pd.to_datetime(u_ns, utc=True)
+    pairs = spot_asof_age(sdf, u_times)
+    spot_u = np.array([x[0] for x in pairs], dtype=float)
+    age_u = np.array([x[1] for x in pairs], dtype=float)
+    spot, spot_age = spot_u[inv], age_u[inv]
+    spot_filled = pd.array(np.where(np.isnan(spot_age), None, spot_age >= 1.0), dtype="boolean")
+
+    K = odf["strike"].to_numpy(dtype=float)
+    ot = odf["option_type"].to_numpy()
+    is_call = ot == "CE"
+    c = odf["c"].to_numpy(dtype=float)
+    v = odf["v"].to_numpy(dtype="float64", na_value=np.nan)
+    oi = odf["oi"].to_numpy(dtype="float64", na_value=np.nan)
+    stale = odf["is_stale"].to_numpy(dtype=bool)
+
+    # reconstructed chain per (minute, expiry, strike): missing legs stay null, never 0
+    def leg(mask, pfx):
+        return pd.DataFrame({"g": grp[mask], "K": K[mask], f"{pfx}_c": c[mask], f"{pfx}_v": v[mask],
+                             f"{pfx}_oi": oi[mask], f"{pfx}_stale": stale[mask]}).drop_duplicates(["g", "K"], keep="last")
+    pair = leg(is_call, "ce").merge(leg(~is_call, "pe"), on=["g", "K"], how="outer", sort=True)
+    for pfx in ("ce", "pe"):
+        col = pair[f"{pfx}_stale"]
+        pair[f"{pfx}_stale"] = col.where(col.notna(), True).astype(bool)
+
+    # forward: put-call parity at the strike with the smallest |C - P| among non-stale pairs, else cost of carry
+    cand = pair[pair["ce_c"].notna() & pair["pe_c"].notna() & ~pair["ce_stale"] & ~pair["pe_stale"]].copy()
+    cand["diff"] = (cand["ce_c"] - cand["pe_c"]).abs()
+    best = cand.sort_values(["g", "diff", "K"], kind="stable").drop_duplicates("g", keep="first")
+    f_par = np.full(n_g, np.nan)
+    f_par[best["g"].to_numpy()] = (best["K"] + best["ce_c"] - best["pe_c"]).to_numpy()
+    g_spot, g_T = spot[first_idx], T[first_idx]
+    with np.errstate(invalid="ignore"):
+        par_ok = np.isfinite(f_par) & (f_par > 0)
+    has_spot = np.isfinite(g_spot)
+    f_g = np.where(par_ok, f_par, np.where(has_spot, g_spot * np.exp((r_rate - q_yield) * g_T), np.nan))
+    src_g = np.where(par_ok, "PARITY", np.where(has_spot, "COST_OF_CARRY", "NONE_NO_SPOT_YET")).astype(object)
+    F = f_g[grp]
+
+    iv, status = solve_iv_vec(c, F, K, T, is_call, stale, iv_bounds)
+    delta, gamma, theta = greeks_vec(F, K, T, iv, is_call)
+
+    step = strike_step(np.unique(K), default_step)
+    with np.errstate(invalid="ignore"):
+        m_bkt = np.where(np.isfinite(spot), np.rint((K - spot) / step), np.nan)
+        # OI is already in units (quantity): no lot-size factor
+        contrib = np.where(np.isfinite(gamma) & np.isfinite(oi) & np.isfinite(spot),
+                           np.where(is_call, 1.0, -1.0) * gamma * oi * spot ** 2 * 0.01, 0.0)
+    gex_g = np.bincount(grp, weights=contrib, minlength=n_g)
+
+    keys = pd.DataFrame({"hhmm": ts_open.dt.strftime("%H:%M").to_numpy(), "ot": ot, "m_bkt": m_bkt, "dte_bkt": dte_row})
+    vb_any, st_any, vb_same, st_same = _baselines(hist, keys, is_monthly)
+    half_sp = np.maximum(tick_sz, 0.005 * c)
+    with np.errstate(invalid="ignore"):
+        fillable = np.isfinite(v) & (v > 0) & ~stale
+
+    iv_df = pd.DataFrame({
+        "instrument_key": odf["instrument_key"].to_numpy(), "underlying": und, "trading_date": d,
+        "expiry_date": exp_dates[exp_codes], "ts_open": ts_open, "ts_close": ts_close,
+        "strike": K, "option_type": ot, "moneyness_bucket": m_bkt, "dte_bucket": dte_row,
+        "close": c, "v": v, "oi": oi, "is_stale": stale,
+        "spot_asof_DERIVED": spot, "spot_age_min": spot_age, "spot_is_filled": spot_filled,
+        "forward_DERIVED": F, "forward_source": src_g[grp],
+        "iv_DERIVED": iv, "delta_DERIVED": delta, "gamma_DERIVED": gamma, "theta_DERIVED": theta,
+        "iv_status": status,
+        "volume_baseline_same_dte_DERIVED": vb_same, "baseline_same_dte_status": st_same,
+        "volume_baseline_any_dte_DERIVED": vb_any, "baseline_any_dte_status": st_any,
+        "half_spread_PROXY": half_sp, "modelled_ask_PROXY": c + half_sp, "fillable": fillable,
+        "available_from_ts": ts_close,
+    })
+
+    g_open = ts_open.iloc[first_idx].reset_index(drop=True)
+    g_close = ts_close.iloc[first_idx].reset_index(drop=True)
+    g_exp = exp_dates[exp_codes[first_idx]]
+    pg = pair["g"].to_numpy()
+    chain_df = pd.DataFrame({
+        "underlying": und, "trading_date": d, "expiry_date": g_exp[pg],
+        "ts_open": g_open.iloc[pg].reset_index(drop=True), "ts_close": g_close.iloc[pg].reset_index(drop=True),
+        "strike": pair["K"].to_numpy(),
+        "ce_close_DERIVED": pair["ce_c"].to_numpy(), "ce_v_DERIVED": pair["ce_v"].to_numpy(),
+        "ce_oi_DERIVED": pair["ce_oi"].to_numpy(), "ce_is_stale": pair["ce_stale"].to_numpy(),
+        "pe_close_DERIVED": pair["pe_c"].to_numpy(), "pe_v_DERIVED": pair["pe_v"].to_numpy(),
+        "pe_oi_DERIVED": pair["pe_oi"].to_numpy(), "pe_is_stale": pair["pe_stale"].to_numpy(),
+        "available_from_ts": g_close.iloc[pg].reset_index(drop=True),
+    })
+
+    # chain metrics as of each minute close: OI carried from each contract's latest closed candle
+    mats = oi_matrices(odf, u_times)
+    g_time, g_code = inv[first_idx], exp_codes[first_idx]
+    names = ("pcr", "call_oi_wall", "put_oi_wall", "max_pain", "n_strikes", "n_oi_known", "n_oi_carried")
+    met = {nm: np.full(n_g, np.nan) for nm in names}
+    for code, e in enumerate(exp_uniques):
+        sel = np.flatnonzero(g_code == code)
+        if e not in mats or not sel.size:
+            continue
+        mm = metrics_matrix(mats[e], spot_u)
+        for nm in names:
+            met[nm][sel] = mm[nm][g_time[sel]]
+    g_age = spot_age[first_idx]
+    metrics_df = pd.DataFrame({
+        "underlying": und, "trading_date": d, "expiry_date": g_exp, "ts_open": g_open, "ts_close": g_close,
+        "pcr_DERIVED": met["pcr"], "call_oi_wall_DERIVED": met["call_oi_wall"],
+        "put_oi_wall_DERIVED": met["put_oi_wall"], "max_pain_DERIVED": met["max_pain"],
+        "n_strikes_DERIVED": np.nan_to_num(met["n_strikes"]).astype("int64"),
+        "n_oi_known_DERIVED": np.nan_to_num(met["n_oi_known"]).astype("int64"),
+        "n_oi_carried_DERIVED": np.nan_to_num(met["n_oi_carried"]).astype("int64"),
+        "gex_proxy_PROXY": gex_g, "spot_asof_DERIVED": g_spot, "spot_age_min": g_age,
+        "spot_is_filled": pd.array(np.where(np.isnan(g_age), None, g_age >= 1.0), dtype="boolean"),
+        "available_from_ts": g_close,
+    })
+    with np.errstate(invalid="ignore"):
+        keep = np.isfinite(m_bkt) & np.isfinite(v)
+    day_hist = keys[keep].assign(v=v[keep])[HIST_COLS]
+    return chain_df, iv_df, metrics_df, day_hist
+
+
+def _load_hist(settings: Settings, und: str, before: dt.date, n_days: int = 40) -> pd.DataFrame:
+    """Baseline history for a windowed derive: volumes of up to n_days derived days BEFORE the window."""
+    parts = []
+    for part in ("dev", "holdout"):
+        parts += [(date_of_part(p), p) for p in list_parts(settings.store_dir, part, "iv_greeks_1m", und)]
+    frames = []
+    for _d, p in sorted(x for x in parts if x[0] < before)[-n_days:]:
+        df = read_parquet(p, columns=["ts_open", "option_type", "moneyness_bucket", "dte_bucket", "v"])
+        df = df[df["moneyness_bucket"].notna() & df["v"].notna()]
+        if len(df):
+            frames.append(pd.DataFrame({
+                "hhmm": pd.to_datetime(df["ts_open"]).dt.tz_convert(IST).dt.strftime("%H:%M").to_numpy(),
+                "ot": df["option_type"].to_numpy(), "m_bkt": df["moneyness_bucket"].to_numpy(dtype=float),
+                "dte_bkt": df["dte_bucket"].to_numpy(), "v": df["v"].to_numpy(dtype=float)}))
+    return _trim_hist(pd.concat(frames, ignore_index=True)) if frames else _empty_hist()
+
+
+def run_derive(settings: Settings, calendar: Optional[Calendar] = None, window: Optional[tuple] = None,
+               tick=None) -> dict:
+    """Derive the Stage 3 tables in strict date sequence without look-ahead.
+    window=(first_day, last_day) derives only those days (week mode); volume baselines then start from the
+    already derived earlier days on disk. Without a window every day in the store is rebuilt."""
     calendar = calendar or load_calendar(settings.reference_dir)
     iv_cfg = load_yaml(settings.reference_dir / "iv_model.yaml")
-    specs_cfg = load_yaml(settings.reference_dir / "specs.yaml")
-    # v3: lot sizes are no longer needed here. Upstox reports OI in units (quantity), not lots (staff reply,
-    # community.upstox.com/t/18087, 2026-10-19), so GEX must not multiply OI by the lot size again.
-    _ = specs_cfg
-    r_rate = float(iv_cfg.get("risk_free_rate", 0.065))
-    q_yield = float(iv_cfg.get("dividend_yield", 0.0))
-    mins_per_yr = float(iv_cfg.get("minutes_per_year", 525600.0))
-    iv_bounds = tuple(iv_cfg.get("iv_bounds", [0.0001, 5.0]))
-    tick_sz = 0.05
+    consts = (float(iv_cfg.get("risk_free_rate", 0.065)), float(iv_cfg.get("dividend_yield", 0.0)),
+              float(iv_cfg.get("minutes_per_year", 525600.0)), tuple(iv_cfg.get("iv_bounds", [0.0001, 5.0])), 0.05)
+    w0, w1 = (to_date(window[0]), to_date(window[1])) if window else (None, None)
 
-    # Gather all daily VIX and daily Spot across dev and holdout (filtered per day < D during loop!)
-    vix_1d_parts = list_parts(settings.store_dir, "dev", "vix_1d") + list_parts(settings.store_dir, "holdout", "vix_1d")
-    vix_1d_df = pd.concat([read_parquet(p) for p in vix_1d_parts], ignore_index=True) if vix_1d_parts else pd.DataFrame()
-    if not vix_1d_df.empty:
-        vix_1d_df["trading_date"] = [to_date(d) for d in vix_1d_df["trading_date"]]
+    def daily_frame(table, und=None):
+        parts = list_parts(settings.store_dir, "dev", table, und) + list_parts(settings.store_dir, "holdout", table, und)
+        df = pd.concat([read_parquet(p) for p in parts], ignore_index=True) if parts else pd.DataFrame()
+        if not df.empty:
+            df["trading_date"] = [to_date(x) for x in df["trading_date"]]
+        return df
 
+    # daily VIX and daily spot across dev and holdout (filtered per day < D inside the loop)
+    vix_1d_df = daily_frame("vix_1d")
     written_files = 0
 
     for und in settings.instrument_names():
         default_step = float(settings.instruments[und].get("strike_step_default", 50.0))
-
-        # Load daily spot for RV20
-        s1d_parts = list_parts(settings.store_dir, "dev", "spot_1d", und) + \
-                    list_parts(settings.store_dir, "holdout", "spot_1d", und)
-        s1d_df = pd.concat([read_parquet(p) for p in s1d_parts], ignore_index=True) if s1d_parts else pd.DataFrame()
-        if not s1d_df.empty:
-            s1d_df["trading_date"] = [to_date(d) for d in s1d_df["trading_date"]]
-
-        # Collect all 1m spot days in chronological sequence
+        s1d_df = daily_frame("spot_1d", und)
         s1m_parts = list_parts(settings.store_dir, "dev", "spot_1m", und) + \
-                    list_parts(settings.store_dir, "holdout", "spot_1m", und)
+            list_parts(settings.store_dir, "holdout", "spot_1m", und)
         days_sorted = sorted({date_of_part(p) for p in s1m_parts})
-
-        # Rolling history for volume baselines (strictly from earlier days < d):
-        # Keyed by (hhmm, moneyness_bucket) -> list of (trading_date, dte_bucket, volume)
-        vol_history = defaultdict(list)
+        if window:
+            days_sorted = [x for x in days_sorted if w0 <= x <= w1]
+        # volume history holds EARLIER days only; a day is added after it has been derived
+        hist = _load_hist(settings, und, w0) if window else _empty_hist()
 
         for d in days_sorted:
+            if tick:
+                tick(f"{und} {iso(d)}")
             part_name = partition_of(d, settings.holdout_start)
-            # Causality rule: when deriving a dev day, never read any holdout row
-            allowed_Daily_vix = vix_1d_df[vix_1d_df["trading_date"] < settings.holdout_start] \
+            # causality rule: when deriving a dev day, never read any holdout row
+            allowed_daily_vix = vix_1d_df[vix_1d_df["trading_date"] < settings.holdout_start] \
                 if (not vix_1d_df.empty and part_name == "dev") else vix_1d_df
-            allowed_Daily_spot = s1d_df[s1d_df["trading_date"] < settings.holdout_start] \
+            allowed_daily_spot = s1d_df[s1d_df["trading_date"] < settings.holdout_start] \
                 if (not s1d_df.empty and part_name == "dev") else s1d_df
 
             sp_path = part_path(settings.store_dir, part_name, "spot_1m", und, d)
@@ -287,24 +493,20 @@ def run_derive(settings: Settings, calendar: Optional[Calendar] = None) -> dict:
             sdf["ts_open"] = pd.to_datetime(sdf["ts_open"]).dt.tz_convert(IST)
             sdf["ts_close"] = pd.to_datetime(sdf["ts_close"]).dt.tz_convert(IST)
 
-            # 9.1 Derive bars_3m and bars_15m
-            b3 = derive_MultiMinute_bars(sdf, 3)
-            b15 = derive_MultiMinute_bars(sdf, 15)
-            if not b3.empty:
-                write_parquet(b3, part_path(settings.store_dir, part_name, "bars_3m", und, d),
-                              {**TABLE_METADATA, "table": "bars_3m"})
-                written_files += 1
-            if not b15.empty:
-                write_parquet(b15, part_path(settings.store_dir, part_name, "bars_15m", und, d),
-                              {**TABLE_METADATA, "table": "bars_15m"})
-                written_files += 1
+            # 9.1 bars_3m and bars_15m
+            for minutes, table in ((3, "bars_3m"), (15, "bars_15m")):
+                bars = derive_MultiMinute_bars(sdf, minutes)
+                if not bars.empty:
+                    write_parquet(bars, part_path(settings.store_dir, part_name, table, und, d),
+                                  {**TABLE_METADATA, "table": table})
+                    written_files += 1
 
-            # 9.4 & 9.5 Daily RV20 and IVP VIX Proxy
-            rv_rows = compute_rv20_for_day(allowed_Daily_spot, d, calendar) if not allowed_Daily_spot.empty else [
+            # 9.4 and 9.5 daily RV20 and the IVP VIX proxy
+            rv_rows = compute_rv20_for_day(allowed_daily_spot, d, calendar) if not allowed_daily_spot.empty else [
                 {"trading_date": d, "version": "INTRADAY_PREV_CLOSE", "rv20_DERIVED": np.nan,
                  "available_from_ts": at_ist(d, "09:15")}
             ]
-            ivp_row = compute_ivp_vix_for_day(allowed_Daily_vix, d) if not allowed_Daily_vix.empty else {
+            ivp_row = compute_ivp_vix_for_day(allowed_daily_vix, d) if not allowed_daily_vix.empty else {
                 "trading_date": d, "ivp_vix_PROXY": np.nan, "ivp_status": "INSUFFICIENT_HISTORY",
                 "available_from_ts": at_ist(d, "09:15"),
             }
@@ -314,202 +516,19 @@ def run_derive(settings: Settings, calendar: Optional[Calendar] = None) -> dict:
                           {**TABLE_METADATA, "table": "daily_metrics_DERIVED"})
             written_files += 1
 
-            # Option chain, IV/Greeks, Baselines, Fill assumptions (9.2, 9.3, 9.5, 9.6, 9.7)
-            opt_path = part_path(settings.store_dir, part_name, "opt_1m", und, d)
-            if not opt_path.exists():
-                continue
-            odf = read_parquet(opt_path)
+            # 9.2, 9.3, 9.5, 9.6, 9.7: chain, IV/greeks, chain metrics, baselines, fill assumptions
+            odf = read_option_day(settings, part_name, und, d)
             if odf.empty:
                 continue
-            odf["ts_open"] = pd.to_datetime(odf["ts_open"]).dt.tz_convert(IST)
-            odf["ts_close"] = pd.to_datetime(odf["ts_close"]).dt.tz_convert(IST)
-
-            step = strike_step(odf["strike"].dropna().unique(), default_step)
-            # v3 (no look-ahead): the spot used for minute T is the last spot candle closed at or before T.
-            # Before, a missing spot minute fell back to the day's LAST close (a value from the future).
-            minute_ts = sorted(set(odf["ts_open"]))
-            spot_pairs = dict(zip(minute_ts, spot_asof_age(sdf, [t + dt.timedelta(minutes=1) for t in minute_ts])))
-            spot_known = {k: v[0] for k, v in spot_pairs.items()}
-            # Chain "as of" each minute close: OI and prices carried from older candles are flagged, never 0.
-            snap_all = asof_chain(odf, [t + dt.timedelta(minutes=1) for t in minute_ts])
-            snap_groups = {k: g for k, g in snap_all.groupby(["snapshot_ts", "expiry_date"], sort=False)}
-
-            chain_rows = []
-            iv_rows = []
-            minute_summary_rows = []
-            day_vol_records = []
-
-            for (ts_o, exp_raw), mgrp in odf.groupby(["ts_open", "expiry_date"], sort=True):
-                exp_d = to_date(exp_raw)
-                ts_c = ts_o + dt.timedelta(minutes=1)
-                spot_c = spot_known.get(ts_o, float("nan"))
-                # v3.1 (Rule 4): flag a carried spot (index closes 15:30, F&O trades on to 15:40)
-                spot_age, spot_filled = spot_flags(spot_pairs.get(ts_o, (np.nan, np.nan))[1])
-                settle_dt = _settlement_time_ist(exp_d, iv_cfg)
-                t_mins = max(1.0, (settle_dt - ts_c).total_seconds() / 60.0)
-                T_yrs = t_mins / mins_per_yr
-                tdte = calendar.count_trading_days(d, exp_d) - (1 if calendar.is_trading_day(d) else 0)
-                dte_bkt = dte_bucket_name(max(0, tdte))
-                hhmm = ts_o.strftime("%H:%M")
-
-                # Reconstruct CE/PE per strike
-                by_k = defaultdict(dict)
-                for _, orow in mgrp.iterrows():
-                    k_val = float(orow["strike"])
-                    ot = orow["option_type"]
-                    by_k[k_val][ot] = orow
-
-                # Forward F: PARITY_THEN_COST_OF_CARRY (Section 9.3)
-                best_diff = None
-                F_val = None
-                for k_val, pair in sorted(by_k.items()):
-                    if "CE" in pair and "PE" in pair:
-                        ce_r, pe_r = pair["CE"], pair["PE"]
-                        if not bool(ce_r["is_stale"]) and not bool(pe_r["is_stale"]):
-                            diff = abs(float(ce_r["c"]) - float(pe_r["c"]))
-                            if best_diff is None or diff < best_diff:
-                                best_diff = diff
-                                F_val = k_val + float(ce_r["c"]) - float(pe_r["c"])
-                if F_val is not None and F_val > 0:
-                    fwd_source = "PARITY"
-                elif not math.isnan(spot_c):
-                    F_val = spot_c * math.exp((r_rate - q_yield) * T_yrs)
-                    fwd_source = "COST_OF_CARRY"
-                else:
-                    F_val = float("nan")
-                    fwd_source = "NONE_NO_SPOT_YET"
-
-                gex_total = 0.0
-
-                for k_val, pair in sorted(by_k.items()):
-                    ce_r = pair.get("CE")
-                    pe_r = pair.get("PE")
-                    ce_c = float(ce_r["c"]) if ce_r is not None else np.nan
-                    pe_c = float(pe_r["c"]) if pe_r is not None else np.nan
-                    # v3 (Rule 4): a contract without a candle in this minute keeps null volume / OI, never 0
-                    ce_v = float(ce_r["v"]) if (ce_r is not None and pd.notna(ce_r["v"])) else np.nan
-                    pe_v = float(pe_r["v"]) if (pe_r is not None and pd.notna(pe_r["v"])) else np.nan
-                    ce_oi = float(ce_r["oi"]) if (ce_r is not None and pd.notna(ce_r["oi"])) else np.nan
-                    pe_oi = float(pe_r["oi"]) if (pe_r is not None and pd.notna(pe_r["oi"])) else np.nan
-                    ce_stale = bool(ce_r["is_stale"]) if ce_r is not None else True
-                    pe_stale = bool(pe_r["is_stale"]) if pe_r is not None else True
-
-                    chain_rows.append({
-                        "underlying": und, "trading_date": d, "expiry_date": exp_d,
-                        "ts_open": ts_o, "ts_close": ts_c, "strike": k_val,
-                        "ce_close_DERIVED": ce_c, "ce_v_DERIVED": ce_v, "ce_oi_DERIVED": ce_oi, "ce_is_stale": ce_stale,
-                        "pe_close_DERIVED": pe_c, "pe_v_DERIVED": pe_v, "pe_oi_DERIVED": pe_oi, "pe_is_stale": pe_stale,
-                        "available_from_ts": ts_c,
-                    })
-
-                    if math.isnan(spot_c):
-                        m_bkt = None
-                    else:
-                        m_bkt = int(round((k_val - spot_c) / step))
-                    for ot, r_opt in (("CE", ce_r), ("PE", pe_r)):
-                        if r_opt is None:
-                            continue
-                        opt_c = float(r_opt["c"])
-                        opt_v = float(r_opt["v"]) if pd.notna(r_opt["v"]) else np.nan
-                        opt_oi = float(r_opt["oi"]) if pd.notna(r_opt["oi"]) else np.nan
-                        opt_stale = bool(r_opt["is_stale"])
-                        iv_res = solve_black76_iv(opt_c, F_val, k_val, T_yrs, ot, is_stale=opt_stale, bounds=iv_bounds)
-                        if pd.notna(iv_res["gamma_DERIVED"]) and not math.isnan(opt_oi) and not math.isnan(spot_c):
-                            sign = 1.0 if ot == "CE" else -1.0
-                            # OI is already in units (quantity): no lot-size factor (v3 fix)
-                            gex_total += sign * float(iv_res["gamma_DERIVED"]) * opt_oi * (spot_c ** 2) * 0.01
-
-                        # Volume baselines (Section 9.6): match by (hhmm, ot, m_bkt), NEVER by strike name!
-                        hist_entries = vol_history.get((hhmm, ot, m_bkt), [])
-                        any_5 = [x[2] for x in hist_entries[-5:]]
-                        same_5 = [x[2] for x in hist_entries if x[1] == dte_bkt][-5:]
-
-                        if len(any_5) >= 5:
-                            vb_any = float(np.mean(any_5))
-                            st_any = "OK"
-                        else:
-                            vb_any = np.nan
-                            st_any = "INSUFFICIENT_HISTORY"
-
-                        if settings.is_monthly(und) and dte_bkt == "0" and len(same_5) == 0:
-                            vb_same = np.nan
-                            st_same = "NO_HISTORY"
-                        elif len(same_5) >= 5:
-                            vb_same = float(np.mean(same_5))
-                            st_same = "OK"
-                        else:
-                            vb_same = np.nan
-                            st_same = "INSUFFICIENT_HISTORY"
-
-                        if m_bkt is not None and not math.isnan(opt_v):
-                            day_vol_records.append(((hhmm, ot, m_bkt), (d, dte_bkt, opt_v)))
-
-                        # Fill assumptions (Section 9.7)
-                        half_sp = max(tick_sz, 0.005 * opt_c)
-                        mod_ask = opt_c + half_sp
-                        fillable = bool(not math.isnan(opt_v) and opt_v > 0 and not opt_stale)
-
-                        iv_rows.append({
-                            "instrument_key": r_opt["instrument_key"],
-                            "underlying": und, "trading_date": d, "expiry_date": exp_d,
-                            "ts_open": ts_o, "ts_close": ts_c,
-                            "strike": k_val, "option_type": ot,
-                            "moneyness_bucket": m_bkt, "dte_bucket": dte_bkt,
-                            "close": opt_c, "v": opt_v, "oi": opt_oi, "is_stale": opt_stale,
-                            "spot_asof_DERIVED": spot_c, "spot_age_min": spot_age, "spot_is_filled": spot_filled,
-                            "forward_DERIVED": F_val, "forward_source": fwd_source,
-                            "iv_DERIVED": iv_res["iv_DERIVED"],
-                            "delta_DERIVED": iv_res["delta_DERIVED"],
-                            "gamma_DERIVED": iv_res["gamma_DERIVED"],
-                            "theta_DERIVED": iv_res["theta_DERIVED"],
-                            "iv_status": iv_res["iv_status"],
-                            "volume_baseline_same_dte_DERIVED": vb_same,
-                            "baseline_same_dte_status": st_same,
-                            "volume_baseline_any_dte_DERIVED": vb_any,
-                            "baseline_any_dte_status": st_any,
-                            "half_spread_PROXY": half_sp,
-                            "modelled_ask_PROXY": mod_ask,
-                            "fillable": fillable,
-                            "available_from_ts": ts_c,
-                        })
-
-                snap = snap_groups.get((pd.Timestamp(ts_c), exp_raw))
-                if snap is None:
-                    snap = snap_all.iloc[0:0]
-                met = chain_metrics(snap, None if math.isnan(spot_c) else spot_c) if not snap.empty else {
-                    "pcr": np.nan, "call_oi_wall": np.nan, "put_oi_wall": np.nan, "max_pain": np.nan,
-                    "n_strikes": 0, "n_oi_known": 0, "n_oi_carried": 0}
-                minute_summary_rows.append({
-                    "underlying": und, "trading_date": d, "expiry_date": exp_d,
-                    "ts_open": ts_o, "ts_close": ts_c,
-                    "pcr_DERIVED": met["pcr"],
-                    "call_oi_wall_DERIVED": met["call_oi_wall"],
-                    "put_oi_wall_DERIVED": met["put_oi_wall"],
-                    "max_pain_DERIVED": met["max_pain"],
-                    "n_strikes_DERIVED": met["n_strikes"],
-                    "n_oi_known_DERIVED": met["n_oi_known"],
-                    "n_oi_carried_DERIVED": met["n_oi_carried"],
-                    "gex_proxy_PROXY": gex_total,
-                    "spot_asof_DERIVED": spot_c, "spot_age_min": spot_age, "spot_is_filled": spot_filled,
-                    "available_from_ts": ts_c,
-                })
-
-            # Update rolling volume history AFTER finishing day d so day d never sees its own future or same-day bars
-            for k_hist, val_hist in day_vol_records:
-                vol_history[k_hist].append(val_hist)
-
-            if chain_rows:
-                write_parquet(pd.DataFrame(chain_rows), part_path(settings.store_dir, part_name, "chain_1m", und, d),
-                              {**TABLE_METADATA, "table": "chain_1m"})
+            res = _derive_option_day(und, d, odf, sdf, calendar, iv_cfg, default_step,
+                                     settings.is_monthly(und), hist, consts)
+            if res is None:
+                continue
+            chain_df, iv_df, metrics_df, day_hist = res
+            for table, df in (("chain_1m", chain_df), ("iv_greeks_1m", iv_df), ("chain_metrics_1m", metrics_df)):
+                write_parquet(df, part_path(settings.store_dir, part_name, table, und, d),
+                              {**TABLE_METADATA, "table": table})
                 written_files += 1
-            if iv_rows:
-                write_parquet(pd.DataFrame(iv_rows), part_path(settings.store_dir, part_name, "iv_greeks_1m", und, d),
-                              {**TABLE_METADATA, "table": "iv_greeks_1m"})
-                written_files += 1
-            if minute_summary_rows:
-                write_parquet(pd.DataFrame(minute_summary_rows),
-                              part_path(settings.store_dir, part_name, "chain_metrics_1m", und, d),
-                              {**TABLE_METADATA, "table": "chain_metrics_1m"})
-                written_files += 1
+            hist = _trim_hist(pd.concat([hist, day_hist], ignore_index=True)) if len(day_hist) else hist
 
     return {"files_written": written_files}
