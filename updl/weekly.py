@@ -28,7 +28,9 @@ from .config import Settings
 from .derive import run_derive
 from .errors import ApiError, ProbeMissing, ProbeTokenBlocked, RetryExhausted, UpdlError
 from .export import run_export
+from .coverage import summary_line, write_strategy_ready
 from .holes import write_day_status
+from .layout import write_layout, write_readme_for_ai
 from .marketinfo import run_marketinfo
 from .messages import REPAIR_HINT, SDCARD_HINT
 from .plan import run_download
@@ -188,8 +190,9 @@ def copy_folder_to_phone(src: Path, root: Optional[Path], index_line: str) -> Op
 
 def package_week(settings: Settings, tag: str, start: dt.date, end: dt.date, val_res: dict, lines: list,
                  phone_dir: Optional[str] = None, tick=None) -> dict:
-    """Plain files for one batch: store/ (Parquet), chain_csv/ (CSV), reports, week_summary.txt; plus a zip
-    that stays on the Termux side. Then the folder is copied to the phone."""
+    """Plain files for one batch: <INDEX>/ folders (1-minute CSV), ai_ready/ (Parquet), chain_15min/, store/,
+    xcheck_csv/, reports, README_FOR_AI.md, week_summary.txt; plus a zip that stays on the Termux side.
+    Then the folder is copied to the phone."""
     out_root = settings.workdir / "phone_outputs"
     week_dir = out_root / tag
     if week_dir.exists():
@@ -205,29 +208,34 @@ def package_week(settings: Settings, tag: str, start: dt.date, end: dt.date, val
                 n_parquet += 1
                 if tick and n_parquet % 20 == 0:
                     tick("store")
-    exp = run_export(settings, start=start, end=end, out_dir=week_dir, make_zip=False, folder_name="chain_csv")
+    exp = run_export(settings, start=start, end=end, out_dir=week_dir, make_zip=False, folder_name="chain_15min")
+    if tick:
+        tick("csv per index")
+    lay = write_layout(settings, start, end, week_dir, tick=tick)
+    write_readme_for_ai(settings, start, end, week_dir)
     xcheck = settings.workdir / "xcheck_csv"
     if xcheck.exists():                 # small: the whole exchange-side folder travels with every batch
         shutil.copytree(xcheck, week_dir / "xcheck_csv", copy_function=shutil.copyfile)
-    for rep in ("health.csv", "health_summary.txt", "reconciliation.csv", "day_status.csv", "holes.csv"):
+    for rep in ("health.csv", "health_summary.txt", "reconciliation.csv", "day_status.csv", "holes.csv",
+                "strategy_ready_days.csv", "data_coverage.csv"):
         if (settings.reports_dir / rep).exists():
             shutil.copyfile(settings.reports_dir / rep, week_dir / rep)
-    readme = week_dir / "chain_csv" / "README_EXPORT.txt"
-    if readme.exists():
-        shutil.copyfile(readme, week_dir / "README_EXPORT.txt")
+    per_index = ", ".join(f"{u} {c['option_rows']} option-minutes / {c['contracts']} contracts" for u, c in lay.items())
     summary = [f"UPDL HAFTA {tag}", f"Hafta window  : {iso(start)} se {iso(end)}",
-               f"Parquet files : {n_parquet} (store/)",
-               f"CSV files     : {exp['csv_files']} (chain_csv/: option chain, README_EXPORT.txt padho)",
+               f"Har index ka folder: {per_index}",
+               f"Parquet files : {n_parquet} (store/) + ai_ready/",
+               f"CSV files     : {exp['csv_files']} (chain_15min/) + per-index CSV; README_EXPORT.txt aur README_FOR_AI.md padho",
                f"Valid days    : {val_res.get('valid_trading_days', 0)} (poore data mein, health.csv dekho)",
                *lines]
     atomic_write_bytes(week_dir / "week_summary.txt", ("\n".join(summary) + "\n").encode("utf-8"), overwrite=True)
     if tick:
         tick("zip")
     zip_path = out_root / f"{tag}.zip"
-    with zipfile.ZipFile(zip_path, "w", compression=zipfile.ZIP_STORED) as zf:      # Parquet is already compressed
+    with zipfile.ZipFile(zip_path, "w") as zf:
         for f in sorted(week_dir.rglob("*")):
-            if f.is_file():
-                zf.write(f, f.relative_to(out_root).as_posix())
+            if f.is_file():       # Parquet is already compressed; CSV / text shrink about 5x
+                kind = zipfile.ZIP_STORED if f.suffix == ".parquet" else zipfile.ZIP_DEFLATED
+                zf.write(f, f.relative_to(out_root).as_posix(), compress_type=kind)
     n_files, n_bytes = _dir_stats(week_dir)
     if tick:
         tick("phone copy")
@@ -423,6 +431,8 @@ def _one_batch(settings, client, base_calendar, cursor, today, window_days, floo
     ds = write_day_status(settings, calendar, start, end, pending_days)
     lines.append("Day status    : " + ", ".join(f"{k} {v}" for k, v in sorted(ds["counts"].items()))
                  + " (day_status.csv, holes.csv)")
+    ready = write_strategy_ready(settings, calendar, start, end)
+    lines.append(summary_line(ready) + " (strategy_ready_days.csv)")
     pkg = package_week(settings, tag, start, end, val_res, lines, phone_dir, tick)
     if progress is not None:
         progress.finish()
@@ -449,6 +459,7 @@ def _one_batch(settings, client, base_calendar, cursor, today, window_days, floo
            f"429 {client.count_429} | avg {calls / dl_min:.0f} calls/min",
            "Stage seconds: " + ", ".join(f"{k} {v:.0f}" for k, v in stage_s.items()) if stage_s else
            f"Valid days in store: {val_res.get('valid_trading_days', 0)}",
+           summary_line(ready),
            f"Files {pkg['files']} | {pkg['mb']} MB",
            f"Phone folder: {pkg['phone_path']}" if pkg["phone_path"] else f"Folder (Termux): {pkg['week_dir']}",
            "Agla hafta: bash termux_run.sh continue"]

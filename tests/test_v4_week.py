@@ -167,7 +167,7 @@ class TestWeekMode(unittest.TestCase):
             self.assertEqual(phone.name, "week_01_2026-11-07_to_2026-11-13")
             for name in ("week_summary.txt", "health.csv", "health_summary.txt", "README_EXPORT.txt"):
                 self.assertTrue((phone / name).exists(), name)
-            self.assertTrue(any(phone.glob("chain_csv/NIFTY/chain_NIFTY_*.csv")))
+            self.assertTrue(any(phone.glob("chain_15min/NIFTY/chain_NIFTY_*.csv")))   # v4.2: chain_csv -> chain_15min
             self.assertTrue(any(phone.glob("store/*/opt_1m/underlying=NIFTY/trading_date=2026-11-1*/part-0.parquet")))
             self.assertFalse(any(p.name.endswith(".tmp") for p in phone.parent.iterdir()))
             self.assertTrue(Path(r1["zip_path"]).exists())
