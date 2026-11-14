@@ -236,7 +236,8 @@ class TestWeekMode(unittest.TestCase):
                 settings, cli = _setup(tmp, Wrap(), workers=workers)
                 res = _week(settings, cli, tmp)
                 for table in ("opt_1m", "spot_1m", "chain_metrics_1m"):
-                    parts = sorted(Path(res["week_dir"]).glob(f"store/*/{table}/underlying=NIFTY/*/part-0.parquet"))
+                    self.assertFalse(Path(res["week_dir"]).exists())      # copied to the phone: no third copy kept
+                    parts = sorted(Path(res["phone_path"]).glob(f"store/*/{table}/underlying=NIFTY/*/part-0.parquet"))
                     self.assertTrue(parts, table)
                     df = pd.concat([pd.read_parquet(p) for p in parts], ignore_index=True)
                     frames[(workers, table)] = df.drop(columns=[c for c in ("fetch_run_id",) if c in df.columns])

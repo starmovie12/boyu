@@ -222,6 +222,8 @@ def package_week(settings: Settings, tag: str, start: dt.date, end: dt.date, val
         tick("phone copy")
     phone = copy_folder_to_phone(week_dir, phone_root(phone_dir),
                                  f"{tag} | {iso(start)}..{iso(end)} | files {n_files} | {n_bytes / 1e6:.1f} MB | {utc_iso()}")
+    if phone is not None:
+        shutil.rmtree(week_dir, ignore_errors=True)   # the phone has the folder and the zip stays here: no third copy
     return {"tag": tag, "start_date": iso(start), "end_date": iso(end), "week_dir": str(week_dir),
             "zip_path": str(zip_path), "phone_path": str(phone) if phone else None, "parquet_files": n_parquet,
             "csv_files": exp["csv_files"], "files": n_files, "mb": round(n_bytes / 1e6, 1)}
