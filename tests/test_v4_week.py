@@ -269,7 +269,7 @@ class TestCalendarFromApi(unittest.TestCase):
         for ok in ("/v2/market/timings/2026-11-12", "/v2/market/holidays", "/v2/market/holidays/2025-10-21"):
             self.assertTrue(path_allowed(ok), ok)
         for bad in ("/v2/market/status/NSE", "/v2/market/timings", "/v2/market/timings/2026-11-12/x",
-                    "/v2/market/holidays/2025/10", "/v2/market/fii"):
+                    "/v2/market/holidays/2025/10", "/v2/market/smartlist/futures"):   # /v2/market/fii became allowed in v4.2
             self.assertFalse(path_allowed(bad), bad)
 
     def test_api_facts_override_the_tables_and_an_unknown_day_is_a_table_gap(self):

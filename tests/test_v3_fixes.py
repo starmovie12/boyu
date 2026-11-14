@@ -389,7 +389,7 @@ class TestRecorder(unittest.TestCase):
         from updl.client import ALLOWED_PATH_TEMPLATES, path_allowed
         self.assertTrue(path_allowed("/v2/option/chain"))
         self.assertFalse(path_allowed("/v2/option/contract"))
-        self.assertEqual(len(ALLOWED_PATH_TEMPLATES), 10)   # v4 added the 3 calendar paths (DECISIONS 19)
+        self.assertEqual(len(ALLOWED_PATH_TEMPLATES), 17)   # v4: 3 calendar paths (DECISIONS 19); v4.2: 6 market-info + LTP (31)
 
     def test_recorder_writes_bid_ask_greeks_and_resumes_by_appending(self):
         import csv as _csv

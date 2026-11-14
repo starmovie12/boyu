@@ -29,6 +29,7 @@ from .derive import run_derive
 from .errors import ApiError, ProbeMissing, ProbeTokenBlocked, RetryExhausted, UpdlError
 from .export import run_export
 from .holes import write_day_status
+from .marketinfo import run_marketinfo
 from .messages import REPAIR_HINT, SDCARD_HINT
 from .plan import run_download
 from .probe import check_probe_fresh, run_probe
@@ -204,6 +205,9 @@ def package_week(settings: Settings, tag: str, start: dt.date, end: dt.date, val
                 if tick and n_parquet % 20 == 0:
                     tick("store")
     exp = run_export(settings, start=start, end=end, out_dir=week_dir, make_zip=False, folder_name="chain_csv")
+    xcheck = settings.workdir / "xcheck_csv"
+    if xcheck.exists():                 # small: the whole exchange-side folder travels with every batch
+        shutil.copytree(xcheck, week_dir / "xcheck_csv", copy_function=shutil.copyfile)
     for rep in ("health.csv", "health_summary.txt", "reconciliation.csv", "day_status.csv", "holes.csv"):
         if (settings.reports_dir / rep).exists():
             shutil.copyfile(settings.reports_dir / rep, week_dir / rep)
@@ -300,6 +304,11 @@ def run_week_batches(settings: Settings, client: HttpClient, calendar: Optional[
             say(REPAIR_HINT.format(n=n_routing))
         _load_rate_window(settings, client.limiter)
         _ensure_probe(settings, client, base_calendar, secrets, say)
+        # exchange-side PCR / max pain / OI / FII-DII first: Upstox drops them after about two weeks
+        try:
+            run_marketinfo(settings, client, cached_calendar(settings, base_calendar), today, log=log, say=say)
+        except (ApiError, RetryExhausted) as err:
+            say(f"[Exchange data] abhi save nahi ho paya ({type(err).__name__}); agli baar phir koshish hogi.")
 
     result = {}
     for _ in range(max(1, int(weeks))):
