@@ -4,6 +4,8 @@ Handles Section 7.4:
 * events.csv (event_id, event_ts_ist, name, class, source_url)
 * constituents.csv (index, symbol, isin, weight, valid_from, valid_to)
 * participant_oi.csv (date, client_type, long, short -> adds usable_from_date = next trading day)
+* corporate_actions.csv (symbol, ex_date, type, ratio, source_url)
+  v4.2: these four are validated first (updl/ownerfiles.py); a file with errors is not copied
 * bhavcopy/ (maps published UDiFF column names via reference/bhavcopy_columns.yaml; prints unmapped columns instead of guessing)
 * stocks.csv (symbol, isin, group, fo_flag)
 """
@@ -15,6 +17,7 @@ from typing import Optional
 import pandas as pd
 
 from .config import Settings, load_yaml
+from .ownerfiles import SCHEMAS, report, validate
 from .sessions import Calendar, load_calendar
 from .store import atomic_write_bytes
 from .timeutil import iso, to_date
@@ -30,35 +33,19 @@ def run_ingest(settings: Settings, target_path: str, calendar: Optional[Calendar
     settings.external_dir.mkdir(parents=True, exist_ok=True)
     name = p.name.lower()
 
-    if name == "participant_oi.csv":
-        df = pd.read_csv(p)
-        for req in ("date", "client_type", "long", "short"):
-            if req not in df.columns:
-                raise ValueError(f"participant_oi.csv missing required column: {req}")
-        df["usable_from_date"] = [iso(calendar.shift(to_date(d), 1)) for d in df["date"]]
-        dest = settings.external_dir / "participant_oi.csv"
-        df.to_csv(dest, index=False)
-        print(f"Ingested participant_oi.csv ({len(df)} rows) with usable_from_date = next trading day.")
-        return {"status": "OK", "rows": len(df), "dest": str(dest)}
-
-    if name == "events.csv":
-        df = pd.read_csv(p)
-        for req in ("event_id", "event_ts_ist", "name", "class", "source_url"):
-            if req not in df.columns:
-                raise ValueError(f"events.csv missing required column: {req}")
-        dest = settings.external_dir / "events.csv"
-        df.to_csv(dest, index=False)
-        print(f"Ingested events.csv ({len(df)} rows).")
-        return {"status": "OK", "rows": len(df), "dest": str(dest)}
-
-    if name == "constituents.csv":
-        df = pd.read_csv(p)
-        for req in ("index", "symbol", "isin", "weight", "valid_from", "valid_to"):
-            if req not in df.columns:
-                raise ValueError(f"constituents.csv missing required column: {req}")
-        dest = settings.external_dir / "constituents.csv"
-        df.to_csv(dest, index=False)
-        print(f"Ingested constituents.csv ({len(df)} rows).")
+    if name in SCHEMAS:
+        # v4.2: validate before copying; a bad file is never copied and nothing is guessed
+        df = pd.read_csv(p, dtype=str, keep_default_na=False)
+        errors = validate(name, df)
+        if errors:
+            print(report(name, errors))
+            return {"status": "INVALID", "errors": errors, "path": str(p)}
+        if name == "participant_oi.csv":
+            df["usable_from_date"] = [iso(calendar.shift(to_date(d), 1)) for d in df["date"]]
+        dest = settings.external_dir / name
+        atomic_write_bytes(dest, df.to_csv(index=False).encode("utf-8"), overwrite=True)
+        extra = " (usable_from_date = agla trading din)" if name == "participant_oi.csv" else ""
+        print(f"Ingested {name} ({len(df)} rows){extra}. Sab checks theek.")
         return {"status": "OK", "rows": len(df), "dest": str(dest)}
 
     if name == "stocks.csv":

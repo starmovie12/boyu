@@ -19,7 +19,7 @@ Order: open PR A -> time-critical B1, B2 (Recorder must be ready before Mon 16 N
 | C3 | Fewer calls: whole contract life per call where it helps; optional spot/VIX fast lane from Jan 2022 | medium | Fable | Extra High | DONE | in PR #4 (`history`); whole-life chunks not built, DECISIONS 33 |
 | C1 | Per-underlying export: spot_1m.csv, contracts.csv, options_1m/<expiry>.csv, futures_1m.csv, ai_ready parquet, 40 MB split | big | Opus | Extra High | DONE | updl/layout.py; tests/test_v42_layout.py |
 | C2 | `coverage` + strategy_ready_days.csv + README_FOR_AI.md | medium | Opus | High | DONE | updl/coverage.py; README_FOR_AI in layout.py; tests/test_v42_layout.py |
-| C4 | Owner-file schemas + validators (events, constituents, corporate actions, participant OI); stock lists only from an official page; derived extras | big | Opus | High | IN-PROGRESS | owner-file schemas + validators in ingest; stock list only from an opened official page |
+| C4 | Owner-file schemas + validators (events, constituents, corporate actions, participant OI); stock lists only from an official page; derived extras | big | Opus | High | DONE (schemas, validators, ISINs) | left: derived extras + spread-report (needs Recorder days); stock lists = owner file |
 | R1 | Code review / integration test of the Fable work (A, B) | medium | Opus | High | TODO | with the C group |
 | D1 | README table "kya milta hai / kya nahi", CHANGELOG, PR texts, this board | small | Sonnet | High | TODO | at the end of each PR |
 

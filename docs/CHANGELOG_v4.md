@@ -54,5 +54,12 @@ cloud ke 22 s se kai guna (ESTIMATE 1-2 min). Target "8 minute ke andar" phone p
 * **Recorder v2**: current + next expiry, spot / future / VIX ka LTP har snapshot mein, `gaps_<date>.csv`, `summary.csv`, `--every` kam se kam 15 second. Download ke saath chal sakta hai (apna lock; download apni limit kam kar leta hai). NOT RUN LIVE (market band tha).
 * Tests ab 71 passed.
 
-## Baaki (PR C)
-Exchange-side PCR / max pain / OI / FII-DII snapshots (sirf ~2 hafte milte hain), `coverage` command, Recorder v2, extras.
+## v4.2 C-group (same branch)
+* **Har index ka alag folder** har hafte (aur `export --layout`): `NIFTY/spot_1m.csv`, `futures_1m.csv`, `contracts.csv`, `options_1m/<expiry>.csv` (ek line = ek contract ka ek minute), `ai_ready/*.parquet` (holdout alag folder mein), `raw_index.csv`, `README_FOR_AI.md`. Chain view ab `chain_15min/` mein.
+* **`python -m updl coverage`**: `data_coverage.csv` + `strategy_ready_days.csv` (har index-din: SPOT / FUT / OPT_BAND / OPT_WIDE / EVENT / SPREAD). Har batch ke aakhir mein ek line.
+* **Owner files**: events, constituents, corporate actions, participant OI ke templates + validators; galat file copy nahi hoti.
+* 14 default stocks ke ISIN asli Upstox master se; manifest ki "about 25 stocks" galti theek (14).
+* Tests: 78 passed.
+
+## Baaki
+Derived extras (iv_daily, skew, vix_term, gamma_flip, vega), spread-report (Recorder data aane ke baad), Nifty50/Sensex stock lists (owner file), bhavcopy columns (real file chahiye).

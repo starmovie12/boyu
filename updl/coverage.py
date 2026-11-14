@@ -93,15 +93,19 @@ def day_rows(settings: Settings, calendar: Calendar, start, end) -> list:
             part = partition_of(d, settings.holdout_start)
             r = {"trading_date": iso(d), "underlying": und}
             sp = part_path(settings.store_dir, part, "spot_1m", und, d)
-            exp_spot = calendar.expected_bars(instrument_class("spot", und, exchange=exch), d) or 375
+            # expected bars come only from the session tables / API calendar (never a constant, test T02)
+            exp_spot = calendar.expected_bars(instrument_class("spot", und, exchange=exch), d)
             n = _rows_in(sp) if sp.exists() else 0
-            r["SPOT"], r["SPOT_reason"] = (READY if n >= SPOT_READY_FRACTION * exp_spot else PARTIAL if n else MISSING,
-                                           f"{n}/{exp_spot} bars")
+            if not exp_spot:
+                r["SPOT"], r["SPOT_reason"] = (PARTIAL if n else MISSING), f"{n} bars, session unknown (TABLE_GAP)"
+            else:
+                r["SPOT"] = READY if n >= SPOT_READY_FRACTION * exp_spot else PARTIAL if n else MISSING
+                r["SPOT_reason"] = f"{n}/{exp_spot} bars"
             fp = part_path(settings.store_dir, part, "fut_1m", und, d)
-            exp_fo = calendar.expected_bars(instrument_class("option", und, exchange=exch), d) or 375
+            exp_fo = calendar.expected_bars(instrument_class("option", und, exchange=exch), d)
             if fp.exists():
                 best = int(read_parquet(fp, columns=["instrument_key"])["instrument_key"].value_counts().max())
-                r["FUT"] = READY if best >= FUT_READY_FRACTION * exp_fo else PARTIAL
+                r["FUT"] = READY if exp_fo and best >= FUT_READY_FRACTION * exp_fo else PARTIAL
                 r["FUT_reason"] = f"best contract {best}/{exp_fo} bars"
             else:
                 r["FUT"], r["FUT_reason"] = MISSING, "futures file nahi hai"

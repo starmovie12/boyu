@@ -294,3 +294,29 @@ bash termux_run.sh record
 | Purana bid/ask, tick data | **Nahi mil sakta** | Upstox deta hi nahi |
 | Purana exchange PCR / max pain (2 hafte se zyada) | **Nahi mil sakta** | chala gaya |
 | Event calendar, Nifty50 ke saare stocks/weights, bhavcopy, participant OI | Upstox se nahi | aapko file deni hogi (agla PR template dega) |
+
+## 18. Aapko kaunsi files deni hain (Upstox yeh data nahi deta)
+Template (sirf header line) `reference/owner_templates/` mein hain. File bharo, phir:
+```bash
+python -m updl ingest <file ka path>
+```
+Galti hogi to program line number ke saath batayega aur file copy nahi karega. Kuch guess nahi hota.
+
+| File | Columns | Kahan se | Kyun chahiye |
+|---|---|---|---|
+| `events.csv` | event_id, event_ts_ist (`2026-12-05T10:00:00+05:30`), name, class (RBI/FED/BUDGET/CPI/GDP/JOBS/RESULTS/EXPIRY/ELECTION/OTHER), source_url, importance, published_ts | RBI, US Fed, MoSPI, Budget ki official calendar pages | bade event ke time trade band rakhna (Bade_Event_Lock) |
+| `constituents.csv` | index, symbol, isin, weight (%), valid_from, valid_to | NSE Indices / BSE factsheet (har mahine) | breadth aur heavyweight checks, purane din ki sahi list |
+| `corporate_actions.csv` | symbol, ex_date, type (SPLIT/BONUS/DIVIDEND/...), ratio (`1:1`), source_url | NSE corporate actions page | split/bonus ka nakli gap pakadna |
+| `participant_oi.csv` | date, client_type (FII/DII/Pro/Client/TOTAL), long, short | NSE "participant wise OI" report | FII/Pro positioning (din D ka data agle din se) |
+| `bhavcopy/` | NSE F&O UDiFF zip jaisa mila waisa | NSE all-reports derivatives | Upstox candles ka independent cross-check |
+
+* Nifty50 aur Sensex ke saare stocks ki list: official page (niftyindices.com, nsearchives) yahan se khul nahi paya, isliye list nahi banayi (invent nahi karta). `external/stocks.csv` mein group `NIFTY50` / `SENSEX` ki lines daaloge to D10 apne aap chalega.
+* Check karo kya mila / kya missing hai:
+```bash
+python -m updl coverage
+```
+  `reports/data_coverage.csv` (har data set) aur `reports/strategy_ready_days.csv` (har din: price data READY / PARTIAL, events + bid/ask ke saath READY).
+* Ek saath sab data, har index alag folder, AI ke liye:
+```bash
+python -m updl export --layout --test-start 2024-10-01 --test-end 2026-11-13
+```
