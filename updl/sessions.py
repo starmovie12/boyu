@@ -1,6 +1,7 @@
 """Dated session table, holiday table and trading-day calendar. Expected bar counts come ONLY from sessions.yaml."""
 from __future__ import annotations
 
+import copy
 import datetime as dt
 import logging
 from functools import lru_cache
@@ -39,6 +40,12 @@ def instrument_class(role: str, underlying: str = "", fo_flag: bool = False, exc
     return "nse_spot_index" if role == "spot" else "nse_index_fo"
 
 
+# session class -> exchange code used by the Upstox timings API (cash F&O stocks keep the YAML row: the API
+# gives the exchange session, not the end of continuous trading before the closing auction)
+EXCHANGE_OF_CLASS = {"nse_index_fo": "NFO", "bse_index_fo": "BFO", "nse_spot_index": "NSE", "india_vix": "NSE",
+                     "bse_spot_index": "BSE", "cash_non_fo_stock": "NSE"}
+
+
 class Calendar:
     def __init__(self, sessions: list, holidays: list, special: list, covers_to: Optional[dt.date] = None,
                  covers_from: Optional[dt.date] = None, table_version=2):
@@ -51,6 +58,18 @@ class Calendar:
         self.covers_from = covers_from
         self.table_version = table_version
         self._warned_end = False
+        # v4: per-day facts read from the Upstox timings API: {date: {"NFO": ("09:15", "15:40"), ...}};
+        # an empty dict means "no exchange open that day". Empty overlay = YAML tables only (offline).
+        self.overlay = {}
+
+    def with_overlay(self, overlay: dict) -> "Calendar":
+        """A copy that prefers API facts for the days in `overlay` (the shared cached calendar stays untouched)."""
+        other = copy.copy(self)
+        other.overlay = {to_date(k): v for k, v in (overlay or {}).items()}
+        return other
+
+    def has_overlay(self, d) -> bool:
+        return to_date(d) in self.overlay
 
     @classmethod
     def load(cls, reference_dir) -> "Calendar":
@@ -67,7 +86,11 @@ class Calendar:
 
     def is_trading_day(self, d) -> bool:
         d = to_date(d)
-        if d.weekday() >= 5 or d in self.holidays:
+        if d.weekday() >= 5:
+            return False            # weekend sessions (Muhurat, Budget Sunday) are special sessions, never normal days
+        if d in self.overlay:
+            return "NSE" in self.overlay[d]
+        if d in self.holidays:
             return False
         if self.covers_to and d > self.covers_to and not self._warned_end:
             self._warned_end = True
@@ -140,6 +163,9 @@ class Calendar:
         d = to_date(d)
         if d in self.special and self.special[d].get("open"):
             return self.special[d]["open"], self.special[d].get("close")
+        api = self.overlay.get(d, {}).get(EXCHANGE_OF_CLASS.get(klass, ""))
+        if api:
+            return api[0], api[1]
         row = self.session_row(klass, d)
         if not row:
             return None, None
@@ -155,6 +181,8 @@ class Calendar:
         d = to_date(d)
         if d in self.special:
             return self.special[d].get("tag", "UNVERIFIED")
+        if self.overlay.get(d, {}).get(EXCHANGE_OF_CLASS.get(klass, "")):
+            return "SOURCE"
         row = self.session_row(klass, d)
         return (row or {}).get("tag", "UNVERIFIED")
 
