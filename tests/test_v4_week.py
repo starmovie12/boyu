@@ -5,6 +5,7 @@ from __future__ import annotations
 import datetime as dt
 import io
 import json
+import re
 import tempfile
 import threading
 import unittest
@@ -42,6 +43,11 @@ class Wrap:
             if day in self.timings:
                 return RawResponse(200, {}, json.dumps({"status": "success", "data": self.timings[day]}).encode())
         if "historical-candle" in url:
+            # like the real API: expired keys carry |dd-mm-yyyy and only work on the expired endpoint
+            dated = re.search(r"%7C\d\d-\d\d-\d{4}/", url) is not None
+            if ("/v2/expired-instruments/" in url) != dated:
+                body = {"status": "error", "errors": [{"errorCode": "UDAPI1021", "message": "key format"}]}
+                return RawResponse(400, {}, json.dumps(body).encode())
             with self._lock:
                 self.n_candle += 1
                 n = self.n_candle
@@ -167,6 +173,16 @@ class TestWeekMode(unittest.TestCase):
             self.assertTrue(Path(r1["zip_path"]).exists())
             for part in phone.rglob("*"):
                 self.assertLess(len(part.name), 40, part.name)
+            # still-listed contracts (expiry 24 Nov) went through V3, expired ones through the expired API:
+            # nothing failed, and the listed option has candles on the days after the 9 Nov expiry
+            from updl.state import FAILED_PERMANENT, State
+            st = State(settings.state_dir)
+            try:
+                self.assertEqual(st.chunks(status=[FAILED_PERMANENT]), [])
+            finally:
+                st.close()
+            opt13 = pd.read_parquet(next(phone.glob("store/*/opt_1m/underlying=NIFTY/trading_date=2026-11-13/part-0.parquet")))
+            self.assertEqual(set(opt13["source"]), {"upstox_v3"})
             # holiday 10 Nov and the Sunday Muhurat 8 Nov are not trading days of the batch
             days = {p.parent.name for p in phone.glob("store/*/spot_1m/underlying=NIFTY/*/part-0.parquet")}
             self.assertEqual(days, {"trading_date=2026-11-09", "trading_date=2026-11-11",

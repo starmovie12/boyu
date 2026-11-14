@@ -27,7 +27,7 @@ from .config import Settings, load_yaml
 from .errors import CorruptFile, FillingForbidden
 from .messages import CORRUPT
 from .sessions import Calendar, instrument_class, load_calendar
-from .state import FAILED_PERMANENT, FAILED_RETRYABLE, INCOMPLETE, State
+from .state import FAILED_PERMANENT, FAILED_RETRYABLE, INCOMPLETE, State, cov_key
 from .store import ITEM_TABLE, atomic_write_bytes, date_of_part, list_parts, read_parquet, verify_raw_integrity
 from .timeutil import at_ist, iso, to_date
 
@@ -273,6 +273,18 @@ def run_validate(settings: Settings, calendar: Optional[Calendar] = None, log=No
                 print(bp)
             raise CorruptFile(f"Corrupted raw file: {bad_raw[0]}")
         inc_chunks = state.chunks(status=[INCOMPLETE, FAILED_RETRYABLE, FAILED_PERMANENT])
+        # v4: a failed chunk whose days were fetched later under another chunk range is no longer a gap
+        # (the old failure row stays in the table for ever and used to mark the day NOT OK for ever)
+        covered_cache = {}
+        still_missing = []
+        for c in inc_chunks:
+            ck = cov_key(c["instrument_key"], "1d" if str(c.get("table_name") or "").endswith("_1d") else "1m")
+            if ck not in covered_cache:
+                covered_cache[ck] = state.covered_dates(ck)
+            days = [x for x in calendar.trading_days(c["from_date"], c["to_date"]) if x not in covered_cache[ck]]
+            if days:
+                still_missing.append({**c, "_days": days})
+        inc_chunks = still_missing
     finally:
         state.close()
 
@@ -285,12 +297,8 @@ def run_validate(settings: Settings, calendar: Optional[Calendar] = None, log=No
 
     incomplete_by_und_day = defaultdict(set)
     for c in inc_chunks:
-        f_d = to_date(c["from_date"])
-        t_d = to_date(c["to_date"])
-        cur = f_d
-        while cur <= t_d:
+        for cur in c["_days"]:
             incomplete_by_und_day[(c["underlying"], cur)].add(c["item_id"])
-            cur += dt.timedelta(days=1)
 
     all_parts = list_parts(settings.store_dir, "dev") + list_parts(settings.store_dir, "holdout")
     dates_in_store = sorted({date_of_part(p) for p in all_parts})

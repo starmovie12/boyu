@@ -417,7 +417,12 @@ def build_selection_plan(settings: Settings, calendar: Optional[Calendar] = None
                     tdays = calendar.trading_days(w0, w1)
                     m_contracts = listed_contracts(masters.get(exch, []), sk,
                                                    kinds=("FUT",) if item_id == "D05" else ("CE", "PE"))
-                    e_contracts = catalog.contracts(und, kind="FUT" if item_id == "D05" else "OPT") if catalog else []
+                    # v4 (found on the first real run): the catalog also stores TODAY's listed contracts
+                    # (source "listed"). Passing those as "expired" sent keys like NSE_FO|61471 to the expired
+                    # endpoint, which rejects them (HTTP 400 UDAPI1021): every still-listed option and future
+                    # failed. Only rows that came from the expired-contract API are expired contracts.
+                    e_contracts = [c for c in catalog.contracts(und, kind="FUT" if item_id == "D05" else "OPT")
+                                   if c.get("source") == "expired"] if catalog else []
                     by_exp = filter_contracts_point_in_time(e_contracts, m_contracts, settings.test_end)
                     all_exps = sorted(by_exp.keys())
 
