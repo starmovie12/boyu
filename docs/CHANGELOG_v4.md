@@ -50,6 +50,9 @@ cloud ke 22 s se kai guna (ESTIMATE 1-2 min). Target "8 minute ke andar" phone p
 * Do run ek saath nahi (`run.lock`); phone band hone ke baad state database check hota hai.
 * `weekday_mismatch` ka shor band: expiry holiday ki wajah se ek din pehle ho to woh normal hai (`expiry_moved_holiday`).
 * Tests: 66 passed (6 naye in `tests/test_v42_repair.py`). Holes before/after `repair` on the owner's phone state: NOT RUN LIVE (the phone state is not in the sandbox; the test rebuilds 1,000 failures + 100 DONE).
+* **Exchange ka data ab save hota hai** (`updl/marketinfo.py`): har `continue` sabse pehle PCR, max pain, OI, change-in-OI (har index, har din, ~2 hafte peeche tak) aur FII/DII save karta hai: `updl_data/xcheck_csv/` aur har batch folder mein `xcheck_csv/`. NOT RUN LIVE (token revoke ho chuka hona chahiye); live facts 14 Nov ke probe calls se hain.
+* **Recorder v2**: current + next expiry, spot / future / VIX ka LTP har snapshot mein, `gaps_<date>.csv`, `summary.csv`, `--every` kam se kam 15 second. Download ke saath chal sakta hai (apna lock; download apni limit kam kar leta hai). NOT RUN LIVE (market band tha).
+* Tests ab 71 passed.
 
-## Baaki (PR B / PR C)
+## Baaki (PR C)
 Exchange-side PCR / max pain / OI / FII-DII snapshots (sirf ~2 hafte milte hain), `coverage` command, Recorder v2, extras.

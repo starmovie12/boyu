@@ -18,6 +18,7 @@ from .messages import ALREADY_RUNNING, STATE_DB_BROKEN
 from .store import atomic_write_bytes, cleanup_temp_files
 
 LOCK_NAME = "run.lock"
+RECORD_LOCK_NAME = "record.lock"     # the Recorder writes no SQLite state: it has its own lock and may run next to a download
 STALE_AFTER_SECONDS = 24 * 3600
 
 
@@ -37,9 +38,10 @@ def _pid_alive(pid: int):
 
 
 class RunLock:
-    def __init__(self, state_dir, command: str, clock=time.time):
-        self.path = Path(state_dir) / LOCK_NAME
+    def __init__(self, state_dir, command: str, clock=time.time, name: str = LOCK_NAME, extra=None):
+        self.path = Path(state_dir) / name
         self.command = command
+        self.extra = dict(extra or {})
         self.clock = clock
         self._held = False
 
@@ -61,7 +63,7 @@ class RunLock:
             raise AlreadyRunning(ALREADY_RUNNING.format(command=held.get("command", "?"), pid=held["pid"],
                                                         started=started, path=self.path))
         self.path.parent.mkdir(parents=True, exist_ok=True)
-        record = {"pid": os.getpid(), "started": self.clock(), "command": self.command}
+        record = {**self.extra, "pid": os.getpid(), "started": self.clock(), "command": self.command}
         atomic_write_bytes(self.path, json.dumps(record).encode("utf-8"), overwrite=True)
         self._held = True
         return self

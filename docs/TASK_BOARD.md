@@ -14,9 +14,9 @@ Order: open PR A -> time-critical B1, B2 (Recorder must be ready before Mon 16 N
 | A3 | reports/day_status.csv + holes.csv (COMPLETE / NOT_YET_SERVED / MISSING_ERROR / NOT_DOWNLOADED) | medium | Fable | Extra High | DONE | in PR #3; tests/test_v42_repair.py |
 | A4 | weekday_mismatch: explain, one line per expiry, holiday moves are info | small | Fable | High | DONE | in PR #3; tests/test_v42_repair.py |
 | A5 | Run lock, SQLite integrity_check, stale .tmp cleanup | medium | Fable | Max | DONE | in PR #3; tests/test_v42_repair.py |
-| B1 | Exchange-side data now: PCR, max pain, OI, change-in-OI, FII/DII (retention ~2 weeks) | medium | Fable | Extra High | IN-PROGRESS | new allowlisted GET paths + updl/marketinfo.py + tests |
-| B2 | Recorder v2 (REST): multi-expiry, spot/VIX/future LTP, gaps file, daily summary, shared limiter | medium | Fable | Extra High | TODO | must not break `record`; ready before Mon 16 Nov 09:10 IST |
-| C3 | Fewer calls: whole contract life per call where it helps; optional spot/VIX fast lane from Jan 2022 | medium | Fable | Extra High | TODO | measure calls per week before/after |
+| B1 | Exchange-side data now: PCR, max pain, OI, change-in-OI, FII/DII (retention ~2 weeks) | medium | Fable | Extra High | DONE | in PR #3; tests/test_v42_marketinfo.py; NOT RUN LIVE |
+| B2 | Recorder v2 (REST): multi-expiry, spot/VIX/future LTP, gaps file, daily summary, shared limiter | medium | Fable | Extra High | DONE | in PR #3; tests/test_v42_recorder.py; NOT RUN LIVE |
+| C3 | Fewer calls: whole contract life per call where it helps; optional spot/VIX fast lane from Jan 2022 | medium | Fable | Extra High | IN-PROGRESS | measure calls per week before/after |
 | C1 | Per-underlying export: spot_1m.csv, contracts.csv, options_1m/<expiry>.csv, futures_1m.csv, ai_ready parquet, 40 MB split | big | Opus | Extra High | TODO | switch model before starting |
 | C2 | `coverage` + strategy_ready_days.csv + README_FOR_AI.md | medium | Opus | High | TODO | after C1 |
 | C4 | Owner-file schemas + validators (events, constituents, corporate actions, participant OI); stock lists only from an official page; derived extras | big | Opus | High | TODO | after C2 |

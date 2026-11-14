@@ -33,6 +33,7 @@ from .marketinfo import run_marketinfo
 from .messages import REPAIR_HINT, SDCARD_HINT
 from .plan import run_download
 from .probe import check_probe_fresh, run_probe
+from .runlock import RECORD_LOCK_NAME, RunLock
 from .sessions import Calendar, load_calendar
 from .state import FAILED_PERMANENT, FAILED_RETRYABLE, INCOMPLETE, State
 from .store import atomic_write_bytes, compact, date_of_part, list_parts
@@ -303,6 +304,13 @@ def run_week_batches(settings: Settings, client: HttpClient, calendar: Optional[
         if n_routing:
             say(REPAIR_HINT.format(n=n_routing))
         _load_rate_window(settings, client.limiter)
+        recorder = RunLock(settings.state_dir, "check", name=RECORD_LOCK_NAME).holder()
+        if recorder and recorder.get("calls_per_30min"):
+            # one account, one limit: leave the running Recorder its share of the 30-minute cap
+            share = int(recorder["calls_per_30min"])
+            client.limiter.max_per_30min = max(100, client.limiter.max_per_30min - share)
+            say(f"[Hafta] Recorder bhi chal raha hai: download ki 30-minute limit {share} calls kam karke "
+                f"{client.limiter.max_per_30min} rakhi (dono ek hi Upstox limit share karte hain).")
         _ensure_probe(settings, client, base_calendar, secrets, say)
         # exchange-side PCR / max pain / OI / FII-DII first: Upstox drops them after about two weeks
         try:

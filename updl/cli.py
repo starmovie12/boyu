@@ -24,9 +24,9 @@ from .monthly import run_monthly_continue
 from .plan import run_download, run_plan_command
 from .probe import run_probe
 from .progress import Progress
-from .recorder import run_record
+from .recorder import DEFAULT_EVERY_SEC, MIN_EVERY_SEC, run_record
 from .repair import run_repair
-from .runlock import RunLock, startup_checks
+from .runlock import RECORD_LOCK_NAME, RunLock, startup_checks
 from .runlog import RunLog
 from .sessions import load_calendar
 from .store import compact
@@ -36,7 +36,7 @@ from .weekly import DEFAULT_WINDOW_DAYS, run_week_batches
 
 COMMANDS = ("probe", "plan", "download", "continue", "month", "compact",
             "validate", "derive", "report", "handoff", "verify", "ingest", "export", "record", "repair")
-LOCKED_COMMANDS = ("download", "continue", "month", "record", "repair")     # one writer per workdir
+LOCKED_COMMANDS = ("download", "continue", "month", "repair")     # one state writer per workdir (record: own lock)
 
 
 def build_parser() -> argparse.ArgumentParser:
@@ -76,7 +76,7 @@ def build_parser() -> argparse.ArgumentParser:
     p.add_argument("--profile", action="store_true", help="continue: print seconds per stage at the end")
     p.add_argument("--synthetic-fixture", action="store_true", help="Label output as SYNTHETIC_FIXTURE")
     p.add_argument("--every", type=int, default=None,
-                   help="export: minutes between chain snapshots (default 15); record: seconds between snapshots (default 60)")
+                   help="export: minutes between chain snapshots (default 15); record: seconds between snapshots (default 60, minimum 15)")
     p.add_argument("--underlyings", default=None, help="record: comma-separated, e.g. NIFTY,SENSEX (default all)")
     p.add_argument("--until", default=None, help="record: stop at HH:MM IST (default: session close)")
     p.add_argument("--once", action="store_true", help="record: take one snapshot now and stop")
@@ -208,8 +208,13 @@ def _dispatch(cmd, args, settings, client, limiter, calendar, rlog, secrets, sle
                 print("record --dry-run: Recorder network ke bina kuch nahi kar sakta. Kuch nahi kiya.")
                 return EXIT_OK
             unds = [u.strip() for u in args.underlyings.split(",")] if args.underlyings else None
-            run_record(settings, client, calendar=calendar, underlyings=unds,
-                       every_sec=args.every or 60, until=args.until, once=args.once, log=rlog)
+            every = max(MIN_EVERY_SEC, int(args.every or DEFAULT_EVERY_SEC))
+            # the Recorder writes no download state, so it may run next to `continue`; a download that starts
+            # while this lock is alive lowers its own 30-minute cap by the Recorder's share (one account limit)
+            share = int((2 * len(unds or settings.instrument_names()) + 1) * 1800 / every)
+            with RunLock(settings.state_dir, "record", name=RECORD_LOCK_NAME, extra={"calls_per_30min": share}):
+                run_record(settings, client, calendar=calendar, underlyings=unds,
+                           every_sec=every, until=args.until, once=args.once, log=rlog)
             return EXIT_OK
 
         if cmd == "export":
