@@ -260,3 +260,37 @@ bash termux_run.sh record
 * "Token expire ho gaya" (exit 20): naya access token file mein daalo, wahi command dobara.
 * "Token nahi mila": `UPSTOX_TOKEN_FILE` set nahi hai (section 2).
 * SSL error: `pkg update -y && pkg upgrade -y` (ca-certificates update hote hain).
+
+## 17. v4.2 ke naye commands (repair, history, record, exchange data)
+* **Purane fail hue chunks wapas lena** (aapke phone par 1,797 the; jo 1,192 sahi aaye woh dobara download nahi honge):
+```bash
+bash termux_run.sh repair
+```
+```bash
+bash termux_run.sh continue
+```
+  `continue` pehle wahi repair wale din laata hai, phir aage ka kaam.
+* **Batch ka sach**: aakhir ke box mein `POORA (COMPLETE)` ya `ADHURA (INCOMPLETE)` likha aata hai. Har batch folder mein `day_status.csv` aur `holes.csv` hain: kaunsa din, kaunsa index, kaunsa data nahi aaya. `NOT_YET_SERVED` = Upstox ne abhi diya nahi, agli baar apne aap aayega.
+* **Exchange ka PCR / max pain / OI / FII-DII**: har `continue` sabse pehle ise save karta hai (`xcheck_csv/` folder). Upstox ise sirf ~2 hafte rakhta hai, isliye hafte mein kam se kam ek baar `continue` chalao. Din D ka yeh data agle session se hi use karo.
+* **Index + VIX ki lambi history (Jan 2022 se, options ke bina, ~250 calls)**:
+```bash
+bash termux_run.sh history
+```
+* **Recorder (Monday se, market time mein, phone charger par)**: live bid/ask, IV, greeks + spot/future/VIX ka LTP. Download ke saath chal sakta hai.
+```bash
+bash termux_run.sh record
+```
+  Files: `updl_data/recorder/<INDEX>/<date>.csv`, `<date>_ltp.csv`, `recorder/gaps_<date>.csv`, `recorder/summary.csv`. Tez chahiye: `--every 15` (15 second se kam nahi).
+* **Do run ek saath nahi**: doosra `continue` / `repair` khud mana kar dega. "State database kharab" likha aaye to file delete mat karo, AI ko batao.
+
+### Kya milta hai, kya nahi mil sakta
+| Data | Milta hai? | Kaise |
+|---|---|---|
+| Index, VIX 1-minute (Jan 2022 se) | Haan | `history`, `continue` |
+| Futures aur options 1-minute + volume + OI (Oct 2024 se) | Haan (Plus plan) | `continue` |
+| IV, greeks, PCR, OI walls, max pain | Haan (hamara hisaab, last price se) | apne aap |
+| Exchange ka PCR / max pain / OI, FII/DII | Sirf aaj se ~2 hafte peeche tak | `continue` har hafte |
+| Live bid/ask, spread | Sirf aage ke liye | `record` roz |
+| Purana bid/ask, tick data | **Nahi mil sakta** | Upstox deta hi nahi |
+| Purana exchange PCR / max pain (2 hafte se zyada) | **Nahi mil sakta** | chala gaya |
+| Event calendar, Nifty50 ke saare stocks/weights, bhavcopy, participant OI | Upstox se nahi | aapko file deni hogi (agla PR template dega) |
