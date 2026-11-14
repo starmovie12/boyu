@@ -6,6 +6,7 @@
 #   bash termux_run.sh continue   next 1-week batch: download, validate, derive, export, copy to
 #                                 Download/BOYU_Data/week_NN_.../ (resumes an interrupted batch first)
 #                                 options: --weeks 4 (several batches), --workers 4, --rate 240
+#   bash termux_run.sh repair     put failed chunks back in the queue (good chunks are never re-downloaded)
 #   bash termux_run.sh record     live option-chain Recorder (market time only)
 #   bash termux_run.sh export     phone CSV zip of the downloaded window
 #   bash termux_run.sh <command>  any other `python -m updl` command
@@ -111,7 +112,7 @@ case "$ACTION" in
             exit 1
         fi
         case "$ACTION" in
-            probe|continue|month|next|download|record) wake_lock ;;
+            probe|continue|month|next|download|record|repair) wake_lock ;;
         esac
         case "$ACTION" in
             continue|month|next) "$PYTHON_BIN" -m updl continue "$@" ;;

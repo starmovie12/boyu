@@ -65,20 +65,36 @@ def weekday_mismatch(expiry: dt.date, rule: str) -> Optional[str]:
     return f"expiry {expiry} is weekday {expiry.weekday()} but rule {rule} expects {want}"
 
 
-def listed_contracts(rows: list, underlying_key: str, kinds=("CE", "PE", "FUT"), logger=None, rule=None) -> list:
+def moved_for_holiday(expiry: dt.date, want_weekday: int, calendar) -> bool:
+    """True when `expiry` is the trading day just before a holiday that falls on the rule's weekday
+    (exchange rule: an expiry on a holiday moves to the previous trading day)."""
+    scheduled = expiry + dt.timedelta(days=1)
+    while scheduled.weekday() != want_weekday:
+        scheduled += dt.timedelta(days=1)
+    return (not calendar.is_trading_day(scheduled)) and calendar.prev_trading_day(scheduled) == expiry
+
+
+def listed_contracts(rows: list, underlying_key: str, kinds=("CE", "PE", "FUT"), logger=None, rule=None,
+                     calendar=None) -> list:
     """Contracts in today's master whose underlying_key matches. expiry ms -> IST date.
-    A weekday mismatch is logged (never corrected). Monthly rules are only checked on weekday, not on last-ness."""
+    A weekday mismatch is logged (never corrected). Monthly rules are only checked on weekday, not on last-ness.
+    v4.2: one log line per expiry (it was one per contract: 1,383 lines in one run, almost all for the monthly
+    expiry moved from the 24 Nov holiday to 23 Nov). With a calendar, an expiry moved for a holiday is logged as
+    `expiry_moved_holiday` (expected); anything else stays `weekday_mismatch` (worth a look)."""
     out = []
+    seen_expiries = set()
     for r in rows:
         if r.get("underlying_key") != underlying_key or r.get("instrument_type") not in kinds:
             continue
         exp = expiry_date_of(r)
         if exp is None:
             continue
-        if rule and logger:
+        if rule and logger and exp not in seen_expiries:
+            seen_expiries.add(exp)
             msg = weekday_mismatch(exp, rule)
             if msg:
-                logger("weekday_mismatch", detail=msg)
+                moved = calendar is not None and moved_for_holiday(exp, WEEKDAY_HINTS[rule], calendar)
+                logger("expiry_moved_holiday" if moved else "weekday_mismatch", detail=msg)
         out.append({"instrument_key": r["instrument_key"], "expiry_date": exp,
                     "strike": r.get("strike_price") if r.get("instrument_type") != "FUT" else None,
                     "option_type": r["instrument_type"], "trading_symbol": r.get("trading_symbol"),

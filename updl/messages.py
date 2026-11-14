@@ -10,6 +10,16 @@ PLAN_B = ("Expired option history nahi mili (Upstox Plus chahiye). Aage ke liye 
           "Recorder chalao: python -m updl record")
 PROBE_TOKEN_BLOCKED = ("Probe token ki wajah se adhura raha (token nahi mila ya reject hua). Token theek karke "
                        "`python -m updl probe` dobara chalao.")
+ROUTING_SUSPECTED = ("5 baar lagataar Upstox ne key reject ki (UDAPI1021 = key galat endpoint par gayi). Yeh program ka "
+                     "routing bug lagta hai, isliye calls barbaad karne ki jagah ruk gaya. State safe hai. "
+                     "Code update karo (bash termux_run.sh update), phir: bash termux_run.sh repair")
+ALREADY_RUNNING = ("Is folder par pehle se ek updl chal raha hai ({command}, PID {pid}, {started} baje se). Do run ek "
+                   "saath state kharab kar sakte hain. Us run ko khatam hone do. Agar woh sach mein band ho chuka "
+                   "hai to yeh file hata do: {path}")
+STATE_DB_BROKEN = ("State database kharab mila (shayad phone beech mein band hua): {path}. Kuch download nahi kiya. "
+                   "Yeh file mujhe (AI ko) batao; ise khud delete mat karo, warna dobara sab download hoga.")
+REPAIR_HINT = ("{n} chunks purane galat-endpoint error (UDAPI1021) se fail pade hain. Unhe wapas line mein lagane ke "
+               "liye chalao: bash termux_run.sh repair")
 SDCARD_HINT = ("Phone ke Download folder mein copy nahi ho paya. Termux mein ek baar `termux-setup-storage` "
                "chalao aur Allow dabao. Zip abhi bhi yahan hai:")
 PLAN_C = "Plan C se idea reject ho sakta hai, approve nahi."

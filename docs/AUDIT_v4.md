@@ -24,6 +24,12 @@ Findings made while changing the code and on two real end-to-end runs with the o
 | V17 | Low | monthly.py | `continue --dry-run` wrote the cursor | code | week mode writes nothing in dry-run (old month mode unchanged) |
 | V18 | Low | client.py | a 429 paused only the thread that got it | code | fixed: `limiter.pause` holds every worker; slow ramp back after a halving |
 | V19 | Low | specs.yaml | NIFTY lot 75 "from 2025-01-02" is wrong for the 30 Jan 2025 expiry (API says 25) | LIVE L6 | table note corrected; code uses each contract's own lot |
+| V20 | High | plan.py `_fetch_chunk` | every 4xx except UDAPI100500 became FAILED_PERMANENT; a wrong-endpoint answer (UDAPI1021) was split into single days first (the owner's month run burned about 1,800 calls) and then kept for ever | owner's state: 1,797 FAILED_PERMANENT, all 400:UDAPI1021 | fixed: UDAPI1021 is retryable, never split; 5 in a row on one endpoint stop the run (`RoutingSuspected`) |
+| V21 | High | (missing) | no way to re-queue failed chunks; the cursor moved on and holes stayed | owner's CSVs (F2) | fixed: `repair` command + `repair_days` in the week cursor; good chunks untouched (test with 1,000 failures / 100 DONE) |
+| V22 | High | weekly.py final box | a batch with failed chunks still said POORA | code | fixed: ADHURA (INCOMPLETE) with a per-item list; `reports/day_status.csv`, `holes.csv` |
+| V23 | Medium | (missing) | two `continue` processes could write one state; no check after a power loss | owner (F4) | fixed: `state/run.lock` (PID, start time, stale detection), SQLite `integrity_check`, `.tmp` cleanup |
+| V24 | Low | master.py `listed_contracts` | `weekday_mismatch` was logged once per contract (1,383 lines). Meaning: the contract's expiry is not on the rule's weekday. Almost all were the monthly expiry moved from the 24 Nov holiday to Mon 23 Nov, which is expected | first live run | fixed: one line per expiry; a holiday move is `expiry_moved_holiday`, anything else stays `weekday_mismatch` |
+| V25 | Medium | plan.py coverage | a contract fetched while listed (key `SEG\|token`) would be fetched again after expiry under its dated key | code | fixed: listed-key days count for the dated key |
 
 ## Measured (sandbox, real API, 4 workers, 240 calls/min)
 See `docs/CHANGELOG_v4.md`.

@@ -43,5 +43,13 @@ cloud ke 22 s se kai guna (ESTIMATE 1-2 min). Target "8 minute ke andar" phone p
 * Found and fixed: prints from other modules were glued to the live line on a terminal (stdout proxy + pty check); ETA ignored the cap wait; forbidden word `order` as a variable name (T09 caught it); bisection returned the largest root on flat prices while the scalar solver returns the smallest; a third copy of every week on disk.
 * Known and left: week mode does not download weekend special sessions; FAILED_PERMANENT chunks are retried on every run; legacy month mode keeps its old (slow, whole-store) pipeline; `weekday_mismatch` log lines are noisy.
 
+## v4.2 (PROMPT_04, same PR): repair aur sach-sach status
+* `bash termux_run.sh repair`: purane fail hue chunks (aapke phone par 1,797, sab UDAPI1021) wapas line mein; sahi 1,192 chunks ko haath nahi lagta. Phir `continue` pehle wahi din laata hai.
+* UDAPI1021 ab kabhi "permanent fail" nahi banta; 5 baar lagataar aaye to run ruk jata hai (calls barbaad nahi hote).
+* Batch tabhi "POORA (COMPLETE)" jab sab chunks aaye; warna "ADHURA (INCOMPLETE)" + list. `day_status.csv` aur `holes.csv` har batch folder mein.
+* Do run ek saath nahi (`run.lock`); phone band hone ke baad state database check hota hai.
+* `weekday_mismatch` ka shor band: expiry holiday ki wajah se ek din pehle ho to woh normal hai (`expiry_moved_holiday`).
+* Tests: 66 passed (6 naye in `tests/test_v42_repair.py`). Holes before/after `repair` on the owner's phone state: NOT RUN LIVE (the phone state is not in the sandbox; the test rebuilds 1,000 failures + 100 DONE).
+
 ## Baaki (PR B / PR C)
 Exchange-side PCR / max pain / OI / FII-DII snapshots (sirf ~2 hafte milte hain), `coverage` command, Recorder v2, extras.

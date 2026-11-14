@@ -4,6 +4,7 @@ Commands:
   probe | plan | download | continue | month | compact | validate | derive | report | handoff | verify | ingest
   continue = one WEEK per run (newest first, then one week further back each time); `--window-days 0` = old month mode
   export (phone CSV zip, option chain at time T) | record (live option-chain Recorder)
+  repair (queue failed chunks again; good chunks are never downloaded twice)
 """
 from __future__ import annotations
 
@@ -24,6 +25,8 @@ from .plan import run_download, run_plan_command
 from .probe import run_probe
 from .progress import Progress
 from .recorder import run_record
+from .repair import run_repair
+from .runlock import RunLock, startup_checks
 from .runlog import RunLog
 from .sessions import load_calendar
 from .store import compact
@@ -32,7 +35,8 @@ from .validate import run_validate
 from .weekly import DEFAULT_WINDOW_DAYS, run_week_batches
 
 COMMANDS = ("probe", "plan", "download", "continue", "month", "compact",
-            "validate", "derive", "report", "handoff", "verify", "ingest", "export", "record")
+            "validate", "derive", "report", "handoff", "verify", "ingest", "export", "record", "repair")
+LOCKED_COMMANDS = ("download", "continue", "month", "record", "repair")     # one writer per workdir
 
 
 def build_parser() -> argparse.ArgumentParser:
@@ -131,6 +135,28 @@ def main(argv: Optional[list] = None, transport=None, environ=None, sleep=None) 
         client = HttpClient(**kw_cli)
 
         cmd = args.command
+        if cmd in LOCKED_COMMANDS and not settings.dry_run:
+            with RunLock(settings.state_dir, cmd):
+                startup_checks(settings)
+                return _dispatch(cmd, args, settings, client, limiter, calendar, rlog, secrets, sleep)
+        return _dispatch(cmd, args, settings, client, limiter, calendar, rlog, secrets, sleep)
+
+    except UpdlError as err:
+        if err.message:
+            print(err.message)
+        return err.exit_code
+    except Exception as exc:
+        print(f"Error: {type(exc).__name__}: {exc}")
+        return EXIT_OTHER_ERROR
+
+
+def _dispatch(cmd, args, settings, client, limiter, calendar, rlog, secrets, sleep) -> int:
+    """Run one command (inside the run lock for commands that write the state)."""
+    if True:
+        if cmd == "repair":
+            run_repair(settings, calendar=calendar)
+            return EXIT_OK
+
         if cmd == "probe":
             run_probe(settings, client, calendar=calendar, probe_today=args.today)
             return EXIT_OK
@@ -228,11 +254,3 @@ def main(argv: Optional[list] = None, transport=None, environ=None, sleep=None) 
             return EXIT_OK
 
         return EXIT_OK
-
-    except UpdlError as err:
-        if err.message:
-            print(err.message)
-        return err.exit_code
-    except Exception as exc:
-        print(f"Error: {type(exc).__name__}: {exc}")
-        return EXIT_OTHER_ERROR
