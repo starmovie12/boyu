@@ -29,6 +29,22 @@ def mmss(seconds: float) -> str:
     return f"{seconds // 60:02d}:{seconds % 60:02d}"
 
 
+class _StdoutProxy:
+    """While the live line is on a terminal, ordinary print() calls first wipe that line, so messages from
+    other modules never get glued to it. The ticker redraws the line within a second."""
+
+    def __init__(self, progress, real):
+        self._progress, self._real = progress, real
+
+    def write(self, text):
+        with self._progress._lock:
+            self._progress._clear()
+            return self._real.write(text)
+
+    def __getattr__(self, name):
+        return getattr(self._real, name)
+
+
 class Progress:
     def __init__(self, stream=None, limiter=None, clock=time.monotonic, sleeper=time.sleep):
         self.stream = stream if stream is not None else sys.stdout
@@ -49,6 +65,7 @@ class Progress:
         self._last_plain_n = 0
         self._spin = 0
         self.stage_seconds = {}
+        self._saved_stdout = None
 
     # ---- state -------------------------------------------------------------------------------------------
     def stage(self, number: int, name: Optional[str] = None) -> None:
@@ -107,8 +124,11 @@ class Progress:
             return 0.0 if self.total > 0 else None
         rate = self.rate_per_min()
         if self.limiter is not None:
-            rate = min(rate, self.limiter.calls_per_min) if rate > 0 else self.limiter.calls_per_min
-            return 60.0 * estimate_minutes(left, max(rate, 1.0), self.limiter.max_per_30min, self.limiter.window_used())
+            lim = self.limiter
+            if lim.waiting == "RATE-CAP":       # the wait itself, then the rest at the configured rate
+                return max(0.0, lim.wait_until - lim.clock()) + left / max(lim.calls_per_min, 1.0) * 60.0
+            rate = min(rate, lim.calls_per_min) if rate > 0 else lim.calls_per_min
+            return 60.0 * estimate_minutes(left, max(rate, 1.0), lim.max_per_30min, lim.window_used())
         return left / rate * 60.0 if rate > 0 else None
 
     def status(self) -> str:
@@ -191,6 +211,9 @@ class Progress:
 
     def start(self) -> "Progress":
         if self._thread is None:
+            if self.tty and self.stream is sys.stdout:
+                self._saved_stdout = sys.stdout
+                sys.stdout = _StdoutProxy(self, self.stream)
             self._stop.clear()
             self._thread = threading.Thread(target=self._ticker, name="updl-progress", daemon=True)
             self._thread.start()
@@ -202,6 +225,9 @@ class Progress:
             self._thread.join(timeout=2.0)
             self._thread = None
         self.finish()
+        if self._saved_stdout is not None:
+            sys.stdout = self._saved_stdout
+            self._saved_stdout = None
 
     def _ticker(self) -> None:
         while not self._stop.wait(1.0):

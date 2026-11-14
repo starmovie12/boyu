@@ -6,11 +6,15 @@ table_version: 2
 # contract's own lot_size ("Lot sizes are kept as originally traded", Upstox staff 2026-10-23), which is the
 # truth; this table is reference only. updl no longer multiplies OI by a lot size (OI is reported in units).
 lot_size:
-  - {underlying: NIFTY,     from: "2025-01-02", to: "2025-12-30", value: 75, basis: contract_expiry, tag: SOURCE_SECONDARY, note: "NSE/FAOP/64625"}
-  - {underlying: NIFTY,     from: "2026-01-06", to: null,         value: 65, basis: contract_expiry, tag: SOURCE_SECONDARY, note: "NSE/FAOP/70616; first weekly 6 Jan 2026"}
-  - {underlying: BANKNIFTY, from: "2025-07-31", to: "2025-12-30", value: 35, basis: contract_expiry, tag: SOURCE_SECONDARY, note: "NSE/FAOP/67372"}
-  - {underlying: BANKNIFTY, from: "2026-01-27", to: null,         value: 30, basis: contract_expiry, tag: SOURCE_SECONDARY, note: "NSE/FAOP/70616; first monthly 27 Jan 2026"}
-  - {underlying: SENSEX,    from: "2024-11-20", to: null,         value: 20, basis: contract_expiry, tag: SOURCE_SECONDARY}
+  # v4: lot sizes read from the expired-contract API on 14 Nov 2026 for sampled expiries (tag SOURCE for those
+  # expiries only; the exact switch dates between samples are UNVERIFIED). The contract's own lot_size is truth.
+  - {underlying: NIFTY,     from: "2024-10-03", to: "2025-01-30", value: 25, basis: contract_expiry, tag: SOURCE, note: "sampled 2024-10-03 and 2025-01-30"}
+  - {underlying: NIFTY,     from: "2025-04-24", to: "2025-08-28", value: 75, basis: contract_expiry, tag: SOURCE, note: "sampled 2025-04-24, 06-12, 06-26, 08-28; start between Feb and Apr 2025 UNVERIFIED"}
+  - {underlying: NIFTY,     from: "2026-01-06", to: null,         value: 65, basis: contract_expiry, tag: SOURCE_SECONDARY, note: "NSE/FAOP/70616; API shows 65 for the 2026-10-27 future"}
+  - {underlying: BANKNIFTY, from: "2025-06-26", to: "2025-06-26", value: 30, basis: contract_expiry, tag: SOURCE, note: "sampled; a 35 lot for Jul-Dec 2025 (NSE/FAOP/67372) is UNVERIFIED"}
+  - {underlying: BANKNIFTY, from: "2026-01-27", to: null,         value: 30, basis: contract_expiry, tag: SOURCE_SECONDARY, note: "NSE/FAOP/70616; API shows 30 for 2026-06-30"}
+  - {underlying: SENSEX,    from: "2024-10-04", to: "2024-10-04", value: 10, basis: contract_expiry, tag: SOURCE, note: "sampled"}
+  - {underlying: SENSEX,    from: "2025-06-24", to: null,         value: 20, basis: contract_expiry, tag: SOURCE, note: "sampled 2025-06-24 and 2026-06-25; switch date UNVERIFIED"}
 tick_size:
   - {underlying: ALL_INDEX_OPTIONS, from: "2025-04-01", to: null, value: 0.05, tag: ASSUMPTION, note: "master value stored as master_tick_size"}
 freeze_quantity:
