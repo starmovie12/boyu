@@ -167,7 +167,7 @@ class TestWeekMode(unittest.TestCase):
             self.assertEqual(phone.name, "week_01_2026-11-07_to_2026-11-13")
             for name in ("week_summary.txt", "health.csv", "health_summary.txt", "README_EXPORT.txt"):
                 self.assertTrue((phone / name).exists(), name)
-            self.assertTrue(any(phone.glob("chain_csv/NIFTY/chain_NIFTY_*.csv")))
+            self.assertTrue(any(phone.glob("chain_15min/NIFTY/chain_NIFTY_*.csv")))   # v4.2: chain_csv -> chain_15min
             self.assertTrue(any(phone.glob("store/*/opt_1m/underlying=NIFTY/trading_date=2026-11-1*/part-0.parquet")))
             self.assertFalse(any(p.name.endswith(".tmp") for p in phone.parent.iterdir()))
             self.assertTrue(Path(r1["zip_path"]).exists())
@@ -269,7 +269,7 @@ class TestCalendarFromApi(unittest.TestCase):
         for ok in ("/v2/market/timings/2026-11-12", "/v2/market/holidays", "/v2/market/holidays/2025-10-21"):
             self.assertTrue(path_allowed(ok), ok)
         for bad in ("/v2/market/status/NSE", "/v2/market/timings", "/v2/market/timings/2026-11-12/x",
-                    "/v2/market/holidays/2025/10", "/v2/market/fii"):
+                    "/v2/market/holidays/2025/10", "/v2/market/smartlist/futures"):   # /v2/market/fii became allowed in v4.2
             self.assertFalse(path_allowed(bad), bad)
 
     def test_api_facts_override_the_tables_and_an_unknown_day_is_a_table_gap(self):
@@ -399,3 +399,25 @@ class TestVectorMaths(unittest.TestCase):
 
 if __name__ == "__main__":
     unittest.main()
+
+
+class TestHistoryFastLane(unittest.TestCase):
+    def test_spot_and_vix_history_costs_one_call_per_28_days_and_nothing_the_second_time(self):
+        from updl.weekly import run_history
+        with tempfile.TemporaryDirectory() as tmp:
+            tr = Wrap()
+            settings, cli = _setup(tmp, tr, items=None)
+            tr.urls.clear()
+            res = run_history(settings, cli, calendar=load_calendar(REF_DIR), today_override=TODAY, start="2026-08-03")
+            self.assertTrue(res["completed"])
+            self.assertEqual((res["start"], res["end"]), ("2026-08-03", "2026-11-13"))
+            one_min = [u for u in tr.urls if "/minutes/1/" in u and not u.endswith("2026-11-13/2026-11-13")]
+            days = [u for u in tr.urls if "/days/1/" in u]
+            self.assertEqual(len(one_min), 2 * 4)        # NIFTY + VIX (fixture), 103 calendar days = 4 chunks of 28
+            self.assertEqual(len(days), 2)
+            self.assertFalse(any("NSE_FO" in u or "expired-instruments/historical" in u for u in tr.urls))
+            self.assertTrue(any(Path(tmp).glob("wd/store/dev/spot_1m/underlying=NIFTY/trading_date=2026-08-03/part-0.parquet")))
+            tr.urls.clear()
+            res2 = run_history(settings, cli, calendar=load_calendar(REF_DIR), today_override=TODAY, start="2026-08-03")
+            self.assertEqual(len([u for u in tr.urls if "/minutes/1/" in u and not u.endswith("2026-11-13/2026-11-13")]), 0)
+            self.assertTrue(res2["completed"])

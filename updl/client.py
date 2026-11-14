@@ -39,6 +39,16 @@ ALLOWED_PATH_TEMPLATES = (
     "/v2/market/holidays",
     "/v2/market/holidays/{date}",
     "/v2/market/timings/{date}",
+    # v4.2: exchange-side cross-check data that Upstox keeps for about two weeks only (updl/marketinfo.py) and
+    # the live LTP quote for the Recorder. All read-only GET market data; paths read in the official SDK and
+    # called live on 14 Nov 2026. DECISIONS 31.
+    "/v2/market/pcr",
+    "/v2/market/max-pain",
+    "/v2/market/oi",
+    "/v2/market/change-oi",
+    "/v2/market/fii",
+    "/v2/market/dii",
+    "/v3/market-quote/ltp",
 )
 MASTER_URLS = {
     "NSE": "https://assets.upstox.com/market-quote/instruments/exchange/NSE.json.gz",

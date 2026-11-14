@@ -69,6 +69,14 @@ class TokenNotPermitted(ApiError):
     """UDAPI100067: this token type (for example an analytics / extended token) is not allowed on the endpoint."""
 
 
+class RoutingSuspected(UpdlError):
+    """Several UDAPI1021 (key format) answers in a row: keys are going to the wrong endpoint. Stop, do not burn calls."""
+
+
+class AlreadyRunning(UpdlError):
+    """Another updl process holds state/run.lock for this workdir."""
+
+
 class RetryExhausted(UpdlError):
     """All retries used up: the chunk becomes FAILED_RETRYABLE."""
 

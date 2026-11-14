@@ -99,6 +99,13 @@ class State:
         self.db.execute("UPDATE chunk_status SET error=? WHERE raw_path=?", (self.RAW_DELETED, raw_path))
         self.db.commit()
 
+    def delete_chunks(self, statuses) -> int:
+        """Remove chunk rows with these statuses (repair: failures only). Coverage rows are not touched."""
+        st = list(statuses)
+        cur = self.db.execute("DELETE FROM chunk_status WHERE status IN (%s)" % ",".join("?" * len(st)), st)
+        self.db.commit()
+        return int(cur.rowcount)
+
     def retryable(self) -> list:
         return self.chunks(status=[FAILED_RETRYABLE, INCOMPLETE])
 

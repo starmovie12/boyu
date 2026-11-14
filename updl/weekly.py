@@ -28,9 +28,14 @@ from .config import Settings
 from .derive import run_derive
 from .errors import ApiError, ProbeMissing, ProbeTokenBlocked, RetryExhausted, UpdlError
 from .export import run_export
-from .messages import SDCARD_HINT
+from .coverage import summary_line, write_strategy_ready
+from .holes import write_day_status
+from .layout import write_layout, write_readme_for_ai
+from .marketinfo import run_marketinfo
+from .messages import REPAIR_HINT, SDCARD_HINT
 from .plan import run_download
 from .probe import check_probe_fresh, run_probe
+from .runlock import RECORD_LOCK_NAME, RunLock
 from .sessions import Calendar, load_calendar
 from .state import FAILED_PERMANENT, FAILED_RETRYABLE, INCOMPLETE, State
 from .store import atomic_write_bytes, compact, date_of_part, list_parts
@@ -75,12 +80,17 @@ def save_cursor(settings: Settings, cursor: dict) -> None:
 def next_batch(cursor: dict, today: dt.date, data_through: dt.date, window_days: int = DEFAULT_WINDOW_DAYS,
                floor: Optional[dt.date] = None) -> Optional[dict]:
     """Pure window maths. Returns {"kind", "start", "end", "next_end"} or None when the history floor is reached.
-    kind: first | new (catch-up of newer days) | back (one window further back)."""
+    kind: first | repair (days queued by `repair`) | new (catch-up of newer days) | back (one window further back)."""
     window_days = max(1, int(window_days))
     newest = to_date(cursor["newest_done"]) if cursor.get("newest_done") else None
     if newest is None:
         start = min(today - dt.timedelta(days=window_days), data_through)
         return {"kind": "first", "start": start, "end": data_through, "next_end": start - dt.timedelta(days=1)}
+    queued = sorted(to_date(x) for x in (cursor.get("repair_days") or []))
+    if queued and queued[0] <= data_through:
+        start = queued[0]
+        end = min(data_through, start + dt.timedelta(days=window_days - 1))
+        return {"kind": "repair", "start": start, "end": end, "next_end": to_date(cursor["next_end"])}
     if data_through > newest:
         start = newest + dt.timedelta(days=1)
         end = min(data_through, start + dt.timedelta(days=window_days - 1))
@@ -180,8 +190,9 @@ def copy_folder_to_phone(src: Path, root: Optional[Path], index_line: str) -> Op
 
 def package_week(settings: Settings, tag: str, start: dt.date, end: dt.date, val_res: dict, lines: list,
                  phone_dir: Optional[str] = None, tick=None) -> dict:
-    """Plain files for one batch: store/ (Parquet), chain_csv/ (CSV), reports, week_summary.txt; plus a zip
-    that stays on the Termux side. Then the folder is copied to the phone."""
+    """Plain files for one batch: <INDEX>/ folders (1-minute CSV), ai_ready/ (Parquet), chain_15min/, store/,
+    xcheck_csv/, reports, README_FOR_AI.md, week_summary.txt; plus a zip that stays on the Termux side.
+    Then the folder is copied to the phone."""
     out_root = settings.workdir / "phone_outputs"
     week_dir = out_root / tag
     if week_dir.exists():
@@ -197,26 +208,34 @@ def package_week(settings: Settings, tag: str, start: dt.date, end: dt.date, val
                 n_parquet += 1
                 if tick and n_parquet % 20 == 0:
                     tick("store")
-    exp = run_export(settings, start=start, end=end, out_dir=week_dir, make_zip=False, folder_name="chain_csv")
-    for rep in ("health.csv", "health_summary.txt", "reconciliation.csv"):
+    exp = run_export(settings, start=start, end=end, out_dir=week_dir, make_zip=False, folder_name="chain_15min")
+    if tick:
+        tick("csv per index")
+    lay = write_layout(settings, start, end, week_dir, tick=tick)
+    write_readme_for_ai(settings, start, end, week_dir)
+    xcheck = settings.workdir / "xcheck_csv"
+    if xcheck.exists():                 # small: the whole exchange-side folder travels with every batch
+        shutil.copytree(xcheck, week_dir / "xcheck_csv", copy_function=shutil.copyfile)
+    for rep in ("health.csv", "health_summary.txt", "reconciliation.csv", "day_status.csv", "holes.csv",
+                "strategy_ready_days.csv"):          # data_coverage.csv: only fresh, from `coverage` / export
         if (settings.reports_dir / rep).exists():
             shutil.copyfile(settings.reports_dir / rep, week_dir / rep)
-    readme = week_dir / "chain_csv" / "README_EXPORT.txt"
-    if readme.exists():
-        shutil.copyfile(readme, week_dir / "README_EXPORT.txt")
+    per_index = ", ".join(f"{u} {c['option_rows']} option-minutes / {c['contracts']} contracts" for u, c in lay.items())
     summary = [f"UPDL HAFTA {tag}", f"Hafta window  : {iso(start)} se {iso(end)}",
-               f"Parquet files : {n_parquet} (store/)",
-               f"CSV files     : {exp['csv_files']} (chain_csv/: option chain, README_EXPORT.txt padho)",
+               f"Har index ka folder: {per_index}",
+               f"Parquet files : {n_parquet} (store/) + ai_ready/",
+               f"CSV files     : {exp['csv_files']} (chain_15min/) + per-index CSV; README_EXPORT.txt aur README_FOR_AI.md padho",
                f"Valid days    : {val_res.get('valid_trading_days', 0)} (poore data mein, health.csv dekho)",
                *lines]
     atomic_write_bytes(week_dir / "week_summary.txt", ("\n".join(summary) + "\n").encode("utf-8"), overwrite=True)
     if tick:
         tick("zip")
     zip_path = out_root / f"{tag}.zip"
-    with zipfile.ZipFile(zip_path, "w", compression=zipfile.ZIP_STORED) as zf:      # Parquet is already compressed
+    with zipfile.ZipFile(zip_path, "w") as zf:
         for f in sorted(week_dir.rglob("*")):
-            if f.is_file():
-                zf.write(f, f.relative_to(out_root).as_posix())
+            if f.is_file():       # Parquet is already compressed; CSV / text shrink about 5x
+                kind = zipfile.ZIP_STORED if f.suffix == ".parquet" else zipfile.ZIP_DEFLATED
+                zf.write(f, f.relative_to(out_root).as_posix(), compress_type=kind)
     n_files, n_bytes = _dir_stats(week_dir)
     if tick:
         tick("phone copy")
@@ -240,6 +259,19 @@ def _ensure_probe(settings: Settings, client: HttpClient, calendar: Calendar, se
         saved = client.budget
         run_probe(settings, client, calendar=calendar)
         client.budget = saved
+
+
+def _failures_by_item(settings: Settings, since_utc: str) -> dict:
+    """{(item, underlying): failed chunk count} for chunks that failed since `since_utc` (any failure status)."""
+    state = State(settings.state_dir)
+    try:
+        out = {}
+        for c in state.chunks(status=[FAILED_RETRYABLE, INCOMPLETE, FAILED_PERMANENT], since_utc=since_utc):
+            key = (c["item_id"], c["underlying"])
+            out[key] = out.get(key, 0) + 1
+        return out
+    finally:
+        state.close()
 
 
 def _failed_since(settings: Settings, since_utc: str) -> tuple:
@@ -275,8 +307,24 @@ def run_week_batches(settings: Settings, client: HttpClient, calendar: Optional[
             "hafta cursor shuru ho raha hai. Jo din pehle se download hain woh dobara download nahi honge.")
 
     if not settings.dry_run:
+        from .repair import routing_failures
+        n_routing = routing_failures(settings)
+        if n_routing:
+            say(REPAIR_HINT.format(n=n_routing))
         _load_rate_window(settings, client.limiter)
+        recorder = RunLock(settings.state_dir, "check", name=RECORD_LOCK_NAME).holder()
+        if recorder and recorder.get("calls_per_30min"):
+            # one account, one limit: leave the running Recorder its share of the 30-minute cap
+            share = int(recorder["calls_per_30min"])
+            client.limiter.max_per_30min = max(100, client.limiter.max_per_30min - share)
+            say(f"[Hafta] Recorder bhi chal raha hai: download ki 30-minute limit {share} calls kam karke "
+                f"{client.limiter.max_per_30min} rakhi (dono ek hi Upstox limit share karte hain).")
         _ensure_probe(settings, client, base_calendar, secrets, say)
+        # exchange-side PCR / max pain / OI / FII-DII first: Upstox drops them after about two weeks
+        try:
+            run_marketinfo(settings, client, cached_calendar(settings, base_calendar), today, log=log, say=say)
+        except (ApiError, RetryExhausted) as err:
+            say(f"[Exchange data] abhi save nahi ho paya ({type(err).__name__}); agli baar phir koshish hogi.")
 
     result = {}
     for _ in range(max(1, int(weeks))):
@@ -317,7 +365,8 @@ def _one_batch(settings, client, base_calendar, cursor, today, window_days, floo
             cursor["anchor_today"] = cursor.get("anchor_today") or iso(today)
             cursor["in_progress"] = batch
             save_cursor(settings, cursor)
-        kind_txt = {"first": "sabse naya hafta", "new": "naye din", "back": "ek hafta aur peeche"}[nb["kind"]]
+        kind_txt = {"first": "sabse naya hafta", "new": "naye din", "back": "ek hafta aur peeche",
+                    "repair": "repair wale din (sirf jo chunks nahi aaye the)"}[nb["kind"]]
         say(f"[Hafta #{batch['batch_no']}] Aaj: {iso(today)} | {kind_txt}: {iso(start)} se {iso(end)}")
         for d in pending_days:
             say(f"[Hafta] {iso(d)} ka data Upstox par abhi nahi aaya (session ke baad kuch ghante lagte hain). "
@@ -357,7 +406,8 @@ def _one_batch(settings, client, base_calendar, cursor, today, window_days, floo
             say(f"[Hafta Retry] {n_retry} chunks do baar try karke bhi nahi aaye (network / server). "
                 f"Thodi der baad wahi command dobara chalao.")
             return {"completed": False, "incomplete": True, "pending_chunks": n_retry}
-    _n_retry, n_perm = _failed_since(settings, since)
+    fail_by = _failures_by_item(settings, since)
+    n_perm = sum(fail_by.values())
     t_dl = time.monotonic()
 
     tick = progress.tick if progress is not None else None
@@ -378,13 +428,21 @@ def _one_batch(settings, client, base_calendar, cursor, today, window_days, floo
              f"avg {calls / dl_min:.0f}/min)",
              f"Failed chunks : {n_perm} permanent (health.csv mein INCOMPLETE_CHUNK dekho)" if n_perm else
              "Failed chunks : 0"]
+    ds = write_day_status(settings, calendar, start, end, pending_days)
+    lines.append("Day status    : " + ", ".join(f"{k} {v}" for k, v in sorted(ds["counts"].items()))
+                 + " (day_status.csv, holes.csv)")
+    ready = write_strategy_ready(settings, calendar, start, end)
+    lines.append(summary_line(ready) + " (strategy_ready_days.csv)")
     pkg = package_week(settings, tag, start, end, val_res, lines, phone_dir, tick)
     if progress is not None:
         progress.finish()
 
-    newest = to_date(cursor["newest_done"]) if cursor.get("newest_done") else None
-    cursor["newest_done"] = iso(max(end, newest) if newest else end)
-    cursor["next_end"] = batch["next_end"]
+    from .repair import drop_repaired_days
+    if batch.get("kind") != "repair":       # a repair batch re-visits old days: the walk cursors do not move
+        newest = to_date(cursor["newest_done"]) if cursor.get("newest_done") else None
+        cursor["newest_done"] = iso(max(end, newest) if newest else end)
+        cursor["next_end"] = batch["next_end"]
+    drop_repaired_days(cursor, start, end)
     cursor["in_progress"] = None
     cursor.setdefault("completed", []).append({**pkg, "batch_no": batch["batch_no"], "kind": batch.get("kind"),
                                                 "completed_utc": utc_iso()})
@@ -392,11 +450,16 @@ def _one_batch(settings, client, base_calendar, cursor, today, window_days, floo
 
     total = time.monotonic() - t_start
     stage_s = dict(progress.stage_seconds) if progress is not None else {}
-    box = [f"HAFTA #{batch['batch_no']} POORA: {iso(start)} se {iso(end)}",
+    complete = not fail_by
+    head = f"HAFTA #{batch['batch_no']} POORA (COMPLETE)" if complete else f"HAFTA #{batch['batch_no']} ADHURA (INCOMPLETE)"
+    box = [f"{head}: {iso(start)} se {iso(end)}",
+           *([] if complete else [f"  nahi aaya -> {item} {und}: {n} chunks" for (item, und), n in sorted(fail_by.items())]
+             + ["  Dobara lene ke liye: bash termux_run.sh repair  (phir continue)"]),
            f"Total time {int(total // 60)}m {int(total % 60)}s | calls {calls} | retries {client.retries} | "
            f"429 {client.count_429} | avg {calls / dl_min:.0f} calls/min",
            "Stage seconds: " + ", ".join(f"{k} {v:.0f}" for k, v in stage_s.items()) if stage_s else
            f"Valid days in store: {val_res.get('valid_trading_days', 0)}",
+           summary_line(ready),
            f"Files {pkg['files']} | {pkg['mb']} MB",
            f"Phone folder: {pkg['phone_path']}" if pkg["phone_path"] else f"Folder (Termux): {pkg['week_dir']}",
            "Agla hafta: bash termux_run.sh continue"]
@@ -405,7 +468,9 @@ def _one_batch(settings, client, base_calendar, cursor, today, window_days, floo
     else:
         for line in box:
             print(line)
-    return {**pkg, "completed": True, "batch_no": batch["batch_no"], "kind": batch.get("kind"), "calls": calls,
+    return {**pkg, "completed": True, "status": "COMPLETE" if complete else "INCOMPLETE",
+            "failed": {f"{i} {u}": n for (i, u), n in fail_by.items()}, "day_status": ds["counts"],
+            "batch_no": batch["batch_no"], "kind": batch.get("kind"), "calls": calls,
             "seconds": round(total, 1), "stage_seconds": stage_s, "pending_days": [iso(d) for d in pending_days]}
 
 
@@ -415,3 +480,56 @@ def _days(a: dt.date, b: dt.date) -> list:
         out.append(d)
         d += dt.timedelta(days=1)
     return out
+
+
+# ---- fast lane: index and VIX history without options -------------------------------------------------------
+SPOT_HISTORY_FROM = "2022-01-03"      # V3 1-minute candles start here (verified live 14 Nov 2026)
+HISTORY_ITEMS = ["D12", "D01", "D02", "D03", "D04"]
+
+
+def run_history(settings: Settings, client: HttpClient, calendar: Optional[Calendar] = None,
+                today_override: Optional[str] = None, start: Optional[str] = None, run_id: str = "r1", log=None,
+                secrets=(), progress=None) -> dict:
+    """`python -m updl history`: spot and India VIX, 1-minute and daily, from Jan 2022 to the newest served day.
+    About 250 calls for the 3 indices + VIX (one call per instrument per 28 days); days already covered are
+    skipped, so a second run costs nothing. Options are not touched (they come week by week)."""
+    log = log or (lambda *a, **k: None)
+    say = progress.note if progress is not None else print
+    base = calendar or load_calendar(settings.reference_dir)
+    today = to_date(today_override) if today_override else today_ist()
+    settings.refetch_last_day = False
+    settings.warmup_items = set()
+    settings.progress = progress
+    settings.items_filter = list(HISTORY_ITEMS)
+    first = to_date(start) if start else to_date(SPOT_HISTORY_FROM)
+    if settings.dry_run:
+        end = base.last_completed_trading_day(today)
+    else:
+        _load_rate_window(settings, client.limiter)
+        _ensure_probe(settings, client, base, secrets, say)
+        end, _pending = detect_data_through(settings, client, cached_calendar(settings, base), today)
+    settings.set_param("TEST_START", iso(first))
+    settings.set_param("TEST_END", iso(end))
+    say(f"[History] Index + VIX ka 1-minute aur daily data: {iso(first)} se {iso(end)} (options nahi).")
+    since, before = utc_iso(), client.calls_made
+    if progress is not None and not settings.dry_run:
+        progress.stage(1)
+    res = run_download(settings, client, base, run_id=run_id, log=log, include_warmup=False, secrets=secrets)
+    if settings.dry_run:
+        return {"dry_run": True, "plan_summary": res}
+    _save_rate_window(settings, client.limiter)
+    if res.get("interrupted") or res.get("stopped_by_limit"):
+        if progress is not None:
+            progress.finish()
+        say("[History] Adhura ruka. Wahi command dobara chalao, kaam wahin se aage badhega.")
+        return {**res, "completed": False}
+    if progress is not None:
+        progress.stage(2)
+    out = compact(settings, base, log=log, since_utc=since, tick=progress.tick if progress is not None else None)
+    if progress is not None:
+        progress.finish()
+    calls = client.calls_made - before
+    say(f"[History] Ho gaya: {calls} calls, {out['files_written']} din-files likhi. Dobara chalane par jo aa chuka "
+        f"hai woh download nahi hoga.")
+    return {"completed": True, "calls": calls, "files_written": out["files_written"], "start": iso(first),
+            "end": iso(end)}

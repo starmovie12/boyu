@@ -24,11 +24,14 @@ import pandas as pd
 from .client import MASTER_URLS, HttpClient, estimate_minutes, expired_candle_path, v3_candle_path
 from .config import ITEM_ORDER, PLANS, Settings, load_yaml
 from .errors import (ApiError, BudgetExceeded, PlusRequired, RetryExhausted, RightsNotAllowed,
-                     TokenExpired)
+                     RoutingSuspected, TokenExpired)
 from .master import (equity_key, find_global, fo_underlying_symbols, listed_contracts,
                      parse_master_bytes, resolve_spot_key)
 from .messages import (CTRL_C, DATA_RIGHTS_WARNING, PLAN_A_PARTIAL, PLAN_B, PLAN_C, PROBE_TOKEN_BLOCKED,
-                       RIGHTS_NOT_ALLOWED, TOKEN_EXPIRED)
+                       RIGHTS_NOT_ALLOWED, ROUTING_SUSPECTED, TOKEN_EXPIRED)
+
+ROUTING_CODE = "UDAPI1021"          # "key format": a key was sent to the endpoint that does not serve it
+ROUTING_BREAKER_LIMIT = 5
 from .probe import check_probe_fresh
 from .selector import (Contract, DayStats, chunk_days, contract_chunks, first_seen_hides,
                        futures_expiries_for_day, monthly_expiries, select_day_options)
@@ -485,6 +488,10 @@ def build_selection_plan(settings: Settings, calendar: Optional[Calendar] = None
                         # v4: D06 (band) and D08 (wide chain) select many of the same contract-days; a day
                         # already planned in this run is not requested a second time
                         seen = planned_cov.setdefault(ck, set())
+                        if state and c.source == "expired" and ck.count("|") == 2:
+                            # v4.2: days fetched while the contract was still listed (plain key SEG|token) count
+                            # for its dated expired key SEG|token|dd-mm-yyyy: same contract, never fetched twice
+                            cov = cov | {x for x in state.covered_dates(ck.rsplit("|", 1)[0]) if x <= c.expiry_date}
                         cov = cov | seen
                         chks = contract_chunks(cdays, cov, cap_c, calendar)
                         for _f, _t, _dd in chks:
@@ -613,6 +620,11 @@ def _fetch_chunk(settings: Settings, client: HttpClient, task: dict, run_id: str
                 intv_name = "day" if interval == "1d" else "1minute"
                 res = client.get(expired_candle_path(ikey, intv_name, iso(t_d), iso(f_d)), kind="expired")
         except ApiError as err:
+            if err.code == ROUTING_CODE:
+                # v4.2: "key format" = the key went to the wrong endpoint. Splitting the range cannot help
+                # (the old run burned ~1,800 calls that way) and it is never a final verdict: retryable.
+                _fail(f_d, t_d, FAILED_RETRYABLE, f"{err.status}:{err.code}")
+                return
             if (err.status == 400 or err.code == "UDAPI100500") and allow_split and len(sub_days) > 1:
                 log("split_retry", item_id=item_id, key=ikey, from_date=iso(f_d), to_date=iso(t_d), code=err.code)
                 for single_d in sub_days:
@@ -656,6 +668,23 @@ def _fetch_chunk(settings: Settings, client: HttpClient, task: dict, run_id: str
     return out
 
 
+class _RoutingBreaker:
+    """Stops the run after ROUTING_BREAKER_LIMIT wrong-endpoint answers in a row on one endpoint."""
+
+    def __init__(self):
+        self.streak = {}
+
+    def note(self, res: dict) -> None:
+        source = res["task"]["source"]
+        if ROUTING_CODE in str(res.get("error") or ""):
+            self.streak[source] = self.streak.get(source, 0) + 1
+            if self.streak[source] >= ROUTING_BREAKER_LIMIT:
+                print(ROUTING_SUSPECTED)
+                raise RoutingSuspected(ROUTING_SUSPECTED)
+        else:
+            self.streak[source] = 0
+
+
 def _record_result(state: State, catalog: Catalog, res: dict, run_id: str) -> None:
     """SQLite side of one chunk result (main thread only). A chunk is DONE only after its raw file exists."""
     t = res["task"]
@@ -680,10 +709,12 @@ def _execute_tasks(settings: Settings, client: HttpClient, state: State, catalog
     workers = max(1, int(getattr(settings, "workers", 1) or 1))
     if prog is not None:
         prog.add_total(len(tasks))
+    breaker = _RoutingBreaker()
     if workers == 1 or len(tasks) < 2:
         for t in tasks:
             for res in _fetch_chunk(settings, client, t, run_id, log):
                 _record_result(state, catalog, res, run_id)
+                breaker.note(res)
             if prog is not None:
                 prog.advance(t["label"])
         return
@@ -703,6 +734,7 @@ def _execute_tasks(settings: Settings, client: HttpClient, state: State, catalog
             for f in done:
                 for res in f.result() or []:        # re-raises TokenExpired / BudgetExceeded from a worker
                     _record_result(state, catalog, res, run_id)
+                    breaker.note(res)
                 if prog is not None:
                     prog.advance(futs[f]["label"])
             state.flush()
@@ -824,7 +856,7 @@ def run_download(settings: Settings, client: HttpClient, calendar: Optional[Cale
                 exch = settings.exchange_of(und)
                 sk, _ = resolve_spot_key(settings.spot_key(und), masters.get(exch, []))
                 m_list = listed_contracts(masters.get(exch, []), sk, kinds=("CE", "PE", "FUT"),
-                                          logger=log, rule=settings.instruments[und].get("expiry"))
+                                          logger=log, rule=settings.instruments[und].get("expiry"), calendar=calendar)
                 if m_list:
                     catalog.add_contracts(und, m_list, "listed")
                     catalog.add_expiries(und, {c["expiry_date"] for c in m_list}, "listed")
@@ -877,7 +909,7 @@ def run_download(settings: Settings, client: HttpClient, calendar: Optional[Cale
                 try:
                     sk, _ = resolve_spot_key(settings.spot_key(und), masters.get(exch, []))
                     m_list = listed_contracts(masters.get(exch, []), sk, kinds=("CE", "PE", "FUT"),
-                                              logger=log, rule=settings.instruments[und].get("expiry"))
+                                              logger=log, rule=settings.instruments[und].get("expiry"), calendar=calendar)
                     if m_list:
                         catalog.add_contracts(und, m_list, "listed")
                         catalog.add_expiries(und, {c["expiry_date"] for c in m_list}, "listed")

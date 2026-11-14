@@ -150,12 +150,16 @@ def _days_in_store(settings: Settings, und: str, start: dt.date, end: dt.date) -
 def run_export(settings: Settings, calendar: Optional[Calendar] = None, start=None, end=None,
                every_min: int = DEFAULT_EVERY_MIN, out_dir: Optional[Path] = None,
                zip_name: Optional[str] = None, phone_dir: Optional[str] = None, make_zip: bool = True,
-               folder_name: Optional[str] = None) -> dict:
-    """Write the CSV files and (by default) one zip. Returns paths and counts. Never calls the network."""
+               folder_name: Optional[str] = None, layout: bool = False) -> dict:
+    """Write the CSV files and (by default) one zip. Returns paths and counts. Never calls the network.
+    layout=True (v4.2, `export --layout`): the whole per-index layout of updl.layout (1-minute CSV per index,
+    ai_ready Parquet, README_FOR_AI.md, reports) with the chain view in chain_15min/."""
     calendar = calendar or load_calendar(settings.reference_dir)
     start = to_date(start) if start else settings.test_start
     end = to_date(end) if end else settings.test_end
     out_root = Path(out_dir) if out_dir else settings.workdir / "exports"
+    if layout:
+        return _run_layout_export(settings, calendar, start, end, every_min, out_root, phone_dir)
     folder = out_root / (folder_name or f"csv_{iso(start)}_{iso(end)}")
     if folder.exists():
         shutil.rmtree(folder)
@@ -193,6 +197,39 @@ def run_export(settings: Settings, calendar: Optional[Calendar] = None, start=No
         print(f"Phone Download folder mein bhi copy: {phone_copy}")
     return {"zip_path": str(zip_path), "folder": str(folder), "csv_files": n_files, "chain_rows": n_rows,
             "days": days_done, "phone_path": phone_copy}
+
+
+def _run_layout_export(settings, calendar, start, end, every_min, out_root, phone_dir) -> dict:
+    from .coverage import write_data_coverage, write_strategy_ready
+    from .layout import write_layout, write_readme_for_ai
+    folder = out_root / f"data_{iso(start)}_{iso(end)}"
+    if folder.exists():
+        shutil.rmtree(folder)
+    chain = run_export(settings, calendar, start, end, every_min, out_dir=folder, make_zip=False,
+                       folder_name="chain_15min")
+    lay = write_layout(settings, start, end, folder)
+    write_readme_for_ai(settings, start, end, folder)
+    write_strategy_ready(settings, calendar, start, end)
+    write_data_coverage(settings)
+    xcheck = settings.workdir / "xcheck_csv"
+    if xcheck.exists():
+        shutil.copytree(xcheck, folder / "xcheck_csv", copy_function=shutil.copyfile)
+    for rep in ("health.csv", "day_status.csv", "holes.csv", "strategy_ready_days.csv", "data_coverage.csv"):
+        if (settings.reports_dir / rep).exists():
+            shutil.copyfile(settings.reports_dir / rep, folder / rep)
+    zip_path = out_root / f"{folder.name}.zip"
+    with zipfile.ZipFile(zip_path, "w") as zf:
+        for f in sorted(folder.rglob("*")):
+            if f.is_file():
+                kind = zipfile.ZIP_STORED if f.suffix == ".parquet" else zipfile.ZIP_DEFLATED
+                zf.write(f, f.relative_to(out_root).as_posix(), compress_type=kind)
+    phone_copy = copy_to_phone(zip_path, phone_dir)
+    rows = sum(c["option_rows"] for c in lay.values())
+    print(f"Export (har index alag): {folder} | {rows} option-minutes | zip {zip_path}")
+    if phone_copy:
+        print(f"Phone Download folder mein bhi copy: {phone_copy}")
+    return {"zip_path": str(zip_path), "folder": str(folder), "csv_files": chain["csv_files"],
+            "chain_rows": chain["chain_rows"], "days": chain["days"], "phone_path": phone_copy, "layout": lay}
 
 
 def copy_to_phone(path: Path, phone_dir: Optional[str] = None) -> Optional[str]:

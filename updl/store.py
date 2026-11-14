@@ -279,6 +279,55 @@ def write_parquet(df: pd.DataFrame, path, metadata: Optional[dict] = None):
     os.replace(tmp, path)
 
 
+class ParquetAppender:
+    """Write one Parquet file from many DataFrames (one row group each), so a long export never holds the whole
+    table in memory. The schema is fixed by the first frame; the file appears (atomically) only on close()."""
+
+    def __init__(self, path, metadata: Optional[dict] = None):
+        self.path = Path(path)
+        self.tmp = self.path.with_name(self.path.name + ".tmp")
+        self.metadata = {str(k).encode(): str(v).encode() for k, v in (metadata or {}).items()}
+        self._writer = None
+        self._schema = None
+        self.rows = 0
+
+    def append(self, df: pd.DataFrame) -> None:
+        import pyarrow as pa
+        import pyarrow.parquet as pq
+
+        if df is None or df.empty:
+            return
+        if self._writer is None:
+            table = pa.Table.from_pandas(df, preserve_index=False)
+            meta = dict(table.schema.metadata or {})
+            meta.update(self.metadata)
+            self._schema = table.schema.with_metadata(meta)
+            self.path.parent.mkdir(parents=True, exist_ok=True)
+            self._writer = pq.ParquetWriter(self.tmp, self._schema, compression="zstd")
+        table = pa.Table.from_pandas(df, schema=self._schema, preserve_index=False)
+        self._writer.write_table(table)
+        self.rows += len(df)
+
+    def close(self) -> None:
+        if self._writer is None:
+            return
+        self._writer.close()
+        self._writer = None
+        with open(self.tmp, "rb") as fh:
+            os.fsync(fh.fileno())
+        os.replace(self.tmp, self.path)
+
+    def abort(self) -> None:
+        """After an error: drop the half-written file instead of publishing it."""
+        if self._writer is not None:
+            try:
+                self._writer.close()
+            finally:
+                self._writer = None
+        if self.tmp.exists():
+            self.tmp.unlink()
+
+
 def read_parquet(path, columns=None) -> pd.DataFrame:
     return pd.read_parquet(path, engine="pyarrow", columns=columns)
 
