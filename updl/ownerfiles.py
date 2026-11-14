@@ -54,6 +54,13 @@ def validate(name: str, df: pd.DataFrame, now: dt.datetime = None) -> list:
     def err(i, text):
         errors.append(f"row {i + 2}: {text}")      # +2: header line and 1-based numbering, as in a spreadsheet
 
+    optional_empty = {"events.csv": {"importance", "published_ts"}, "constituents.csv": {"valid_to"},
+                      "corporate_actions.csv": {"ratio"}}.get(name, set())
+    for i, r in df.iterrows():
+        for col in schema["required"]:
+            if col not in optional_empty and (pd.isna(r[col]) or not str(r[col]).strip()):
+                err(i, f"{col} khali hai")
+
     if name == "events.csv":
         prev = None
         for i, r in df.iterrows():

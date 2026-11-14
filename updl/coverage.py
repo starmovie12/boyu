@@ -12,6 +12,7 @@ from __future__ import annotations
 
 import csv
 import datetime as dt
+import os
 from pathlib import Path
 from typing import Optional
 
@@ -34,7 +35,7 @@ OWNER_FILES = [("D13", "bhavcopy", "NSE F&O bhavcopy (external/bhavcopy/)"),
                ("D18", "events.csv", "event calendar (external/events.csv)"),
                ("D19", "constituents.csv", "index constituents and weights (external/constituents.csv)"),
                ("CA", "corporate_actions.csv", "corporate actions (external/corporate_actions.csv)")]
-SPOT_READY_FRACTION, FUT_READY_FRACTION = 0.99, 0.90
+SPOT_READY_FRACTION, FUT_READY_FRACTION, SPREAD_READY_FRACTION = 0.99, 0.90, 0.90
 
 
 def _rows_in(path: Path) -> int:
@@ -79,13 +80,44 @@ def _options_status(settings, status_map, und, d, table) -> tuple:
                          else "download nahi hua (continue / repair)")
     if st == "MISSING_ERROR":
         return PARTIAL, "kuch contracts fail hue: bash termux_run.sh repair"
-    return READY, f"{_rows_in(p)} rows"
+    if st in ("NOT_DOWNLOADED", "NOT_YET_SERVED"):
+        return PARTIAL, f"{_rows_in(p)} rows, par day_status {st}: continue chalao"
+    return READY, f"{_rows_in(p)} rows" + ("" if st else " (day_status abhi nahi bana)")
+
+
+def _recorded_seconds(settings: Settings) -> dict:
+    """{(date, index): seconds covered} from recorder/summary.csv, summed over restarts of the same day."""
+    p = Path(settings.workdir) / "recorder" / "summary.csv"
+    out = {}
+    if p.exists():
+        with open(p, "r", encoding="utf-8", newline="") as fh:
+            for r in csv.DictReader(fh):
+                try:
+                    sec = int(r["snapshots"]) * int(r["every_sec"])
+                except (KeyError, ValueError, TypeError):
+                    continue
+                for und in str(r.get("underlyings") or "").split():
+                    out[(r.get("date"), und)] = out.get((r.get("date"), und), 0) + sec
+    return out
+
+
+def _spread_status(rec_file: Path, seconds: Optional[int], exp_fo) -> tuple:
+    """A recorder file alone is not a full day: READY only if the snapshots cover most of the F&O session."""
+    if not rec_file.exists():
+        return MISSING, "Recorder ne record nahi kiya; purana bid/ask kabhi nahi milta"
+    if seconds is None:
+        return PARTIAL, "Recorder file hai, summary nahi (run beech mein band hua?)"
+    if not exp_fo:
+        return PARTIAL, f"{seconds // 60} min record hua, session unknown (TABLE_GAP)"
+    share = seconds / (exp_fo * 60)
+    return (READY if share >= SPREAD_READY_FRACTION else PARTIAL), f"session ka {min(share, 1.0):.0%} record hua"
 
 
 def day_rows(settings: Settings, calendar: Calendar, start, end) -> list:
     start, end = to_date(start), to_date(end)
     status_map = _day_status(settings)
     events = _events_range(settings)
+    recorded = _recorded_seconds(settings)
     rows = []
     for d in calendar.trading_days(start, end):
         for und in settings.instrument_names():
@@ -106,7 +138,8 @@ def day_rows(settings: Settings, calendar: Calendar, start, end) -> list:
             if fp.exists():
                 best = int(read_parquet(fp, columns=["instrument_key"])["instrument_key"].value_counts().max())
                 r["FUT"] = READY if exp_fo and best >= FUT_READY_FRACTION * exp_fo else PARTIAL
-                r["FUT_reason"] = f"best contract {best}/{exp_fo} bars"
+                r["FUT_reason"] = (f"best contract {best}/{exp_fo} bars" if exp_fo
+                                   else f"best contract {best} bars, session unknown (TABLE_GAP)")
             else:
                 r["FUT"], r["FUT_reason"] = MISSING, "futures file nahi hai"
             r["OPT_BAND"], r["OPT_BAND_reason"] = _options_status(settings, status_map, und, d, "opt_1m")
@@ -118,10 +151,7 @@ def day_rows(settings: Settings, calendar: Calendar, start, end) -> list:
             else:
                 r["EVENT"], r["EVENT_reason"] = MISSING, "events.csv is din tak nahi pahunchti"
             rec = Path(settings.workdir) / "recorder" / und / f"{iso(d)}.csv"
-            if rec.exists():
-                r["SPREAD"], r["SPREAD_reason"] = READY, "Recorder file hai (bid/ask)"
-            else:
-                r["SPREAD"], r["SPREAD_reason"] = MISSING, "Recorder ne record nahi kiya; purana bid/ask kabhi nahi milta"
+            r["SPREAD"], r["SPREAD_reason"] = _spread_status(rec, recorded.get((iso(d), und)), exp_fo)
             core = (r["SPOT"], r["FUT"], r["OPT_BAND"])
             r["PRICE_READY"] = READY if all(x == READY for x in core) else MISSING if r["SPOT"] == MISSING else PARTIAL
             if r["PRICE_READY"] == READY:
@@ -166,11 +196,21 @@ def data_sets(settings: Settings) -> list:
 
 
 def _write(path: Path, fields: list, rows: list) -> None:
+    """Atomic: `coverage` holds no run lock, so a reader never sees a half-written file."""
     path.parent.mkdir(parents=True, exist_ok=True)
-    with open(path, "w", encoding="utf-8", newline="") as fh:
+    tmp = path.with_name(path.name + ".tmp")
+    with open(tmp, "w", encoding="utf-8", newline="") as fh:
         w = csv.DictWriter(fh, fieldnames=fields, extrasaction="ignore")
         w.writeheader()
         w.writerows(rows)
+    os.replace(tmp, path)
+
+
+def write_data_coverage(settings: Settings) -> list:
+    sets = data_sets(settings)
+    _write(Path(settings.reports_dir) / "data_coverage.csv",
+           ["item", "data", "files", "rows", "first_day", "last_day", "status", "reason"], sets)
+    return sets
 
 
 def write_strategy_ready(settings: Settings, calendar: Calendar, start, end) -> dict:
@@ -197,9 +237,7 @@ def summary_line(res: dict) -> str:
 
 
 def run_coverage(settings: Settings, calendar: Calendar, start=None, end=None, say=print) -> dict:
-    sets = data_sets(settings)
-    _write(Path(settings.reports_dir) / "data_coverage.csv",
-           ["item", "data", "files", "rows", "first_day", "last_day", "status", "reason"], sets)
+    sets = write_data_coverage(settings)
     days = sorted({to_date(p.parent.name.split("=", 1)[1]) for part in ("dev", "holdout")
                    for p in list_parts(settings.store_dir, part, "spot_1m")})
     first: Optional[dt.date] = to_date(start) if start else (days[0] if days else None)

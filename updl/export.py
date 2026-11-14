@@ -200,7 +200,7 @@ def run_export(settings: Settings, calendar: Optional[Calendar] = None, start=No
 
 
 def _run_layout_export(settings, calendar, start, end, every_min, out_root, phone_dir) -> dict:
-    from .coverage import write_strategy_ready
+    from .coverage import write_data_coverage, write_strategy_ready
     from .layout import write_layout, write_readme_for_ai
     folder = out_root / f"data_{iso(start)}_{iso(end)}"
     if folder.exists():
@@ -210,6 +210,10 @@ def _run_layout_export(settings, calendar, start, end, every_min, out_root, phon
     lay = write_layout(settings, start, end, folder)
     write_readme_for_ai(settings, start, end, folder)
     write_strategy_ready(settings, calendar, start, end)
+    write_data_coverage(settings)
+    xcheck = settings.workdir / "xcheck_csv"
+    if xcheck.exists():
+        shutil.copytree(xcheck, folder / "xcheck_csv", copy_function=shutil.copyfile)
     for rep in ("health.csv", "day_status.csv", "holes.csv", "strategy_ready_days.csv", "data_coverage.csv"):
         if (settings.reports_dir / rep).exists():
             shutil.copyfile(settings.reports_dir / rep, folder / rep)

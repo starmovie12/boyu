@@ -52,7 +52,7 @@ ai_ready/                 wahi options table Parquet mein (pandas: pd.read_parqu
                           strategy banate waqt use mat kholo; sirf aakhri ek test ke liye.
 chain_15min/              har 15 minute ki option chain (spot, CE/PE close, OI, PCR, OI walls, max pain)
 xcheck_csv/               exchange ka PCR / max pain / OI / FII-DII (Upstox se; din D ka data agle din se use karo)
-store/                    poora Parquet store (sab tables, derived IV/greeks bhi)
+store/                    poora Parquet store (sab tables, derived IV/greeks bhi; sirf hafte wale folder mein)
 health.csv, day_status.csv, holes.csv, strategy_ready_days.csv   kaunsa din poora hai, kya missing hai
 README_FOR_AI.md          AI ko strategy banwane se pehle yeh file do
 raw_index.csv             raw/ folder ke hash-naam -> index, item, instrument_key
@@ -236,9 +236,12 @@ def write_layout(settings: Settings, start, end, out_dir, tick=None) -> dict:
                                                    "last_day": iso(d), "minutes_with_data": 0})
                     c["last_day"] = iso(d)
                     c["minutes_with_data"] += int(r["n"])
-        finally:
+        except BaseException:
             for w in ai.values():
-                w.close()
+                w.abort()
+            raise
+        for w in ai.values():
+            w.close()
         if contracts:
             udir.mkdir(parents=True, exist_ok=True)
             with open(udir / "contracts.csv", "w", encoding="utf-8", newline="") as fh:
@@ -267,7 +270,8 @@ and `ai_ready/holdout/`).
   instrument_key (+ trading_date, underlying, expiry in Parquet).
 - `<INDEX>/spot_1m.csv` (index, no volume), `<INDEX>/futures_1m.csv`, `<INDEX>/contracts.csv` (lot_size).
 - `store/` all tables, incl. derived `iv_greeks_1m` and `chain_metrics_1m` (PCR, OI walls, max pain). Every
-  derived row has `available_from_ts`: never use a value before that time.
+  derived row has `available_from_ts`: never use a value before that time. (Weekly batch folders carry `store/`;
+  an `export --layout` folder does not: use the Parquet store in the updl workdir.)
 - `xcheck_csv/`: exchange-side PCR / max pain / OI / FII-DII; values of day D are usable only from the next session.
 - `strategy_ready_days.csv`: which index-days have complete price data (PRICE_READY) and also events and
   recorded bid/ask (FULL_READY). Test only on READY days, or say clearly how you treat the others.

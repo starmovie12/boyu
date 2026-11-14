@@ -30,6 +30,12 @@ Findings made while changing the code and on two real end-to-end runs with the o
 | V23 | Medium | (missing) | two `continue` processes could write one state; no check after a power loss | owner (F4) | fixed: `state/run.lock` (PID, start time, stale detection), SQLite `integrity_check`, `.tmp` cleanup |
 | V24 | Low | master.py `listed_contracts` | `weekday_mismatch` was logged once per contract (1,383 lines). Meaning: the contract's expiry is not on the rule's weekday. Almost all were the monthly expiry moved from the 24 Nov holiday to Mon 23 Nov, which is expected | first live run | fixed: one line per expiry; a holiday move is `expiry_moved_holiday`, anything else stays `weekday_mismatch` |
 | V25 | Medium | plan.py coverage | a contract fetched while listed (key `SEG\|token`) would be fetched again after expiry under its dated key | code | fixed: listed-key days count for the dated key |
+| V26 | Medium | coverage.py SPREAD | any recorder file made the day READY, even a 2-minute run | R1 review | fixed: READY only if `recorder/summary.csv` shows at least 90% of the F&O session; no summary (killed run) = PARTIAL |
+| V27 | Medium | coverage.py options | an options file whose plan was not finished (`NOT_DOWNLOADED` / `NOT_YET_SERVED` in day_status) counted as READY | R1 review | fixed: PARTIAL with the reason |
+| V28 | Medium | store.py ParquetAppender | after an error mid-export, `close()` in a `finally` published a half `ai_ready` Parquet file as if complete | R1 review | fixed: `abort()` deletes the temp file; only a clean run publishes |
+| V29 | Medium | ingest.py owner files | a CSV saved by Excel ("CSV UTF-8") starts with a BOM, so the first column was reported missing; empty required cells passed | R1 review | fixed: `utf-8-sig`, header spaces stripped, empty required cells refused (a dividend may have no ratio) |
+| V30 | Low | cli.py ingest | a refused owner file still exited 0 | R1 review | fixed: exit 10 (`EXIT_SOME_NOT_OK`) |
+| V31 | Low | coverage / export / weekly | `strategy_ready_days.csv` was written non-atomically without a lock; a stale `data_coverage.csv` was copied into week folders; `export --layout` had no `xcheck_csv/`; README_FOR_AI promised `store/` there | R1 review | fixed: atomic write; week folders no longer carry the stale file (fresh only from `coverage` / `export --layout`); `xcheck_csv/` copied; README says `store/` is in week folders only |
 
 ## Measured (sandbox, real API, 4 workers, 240 calls/min)
 See `docs/CHANGELOG_v4.md`.

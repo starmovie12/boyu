@@ -35,7 +35,8 @@ def run_ingest(settings: Settings, target_path: str, calendar: Optional[Calendar
 
     if name in SCHEMAS:
         # v4.2: validate before copying; a bad file is never copied and nothing is guessed
-        df = pd.read_csv(p, dtype=str, keep_default_na=False)
+        df = pd.read_csv(p, dtype=str, keep_default_na=False, encoding="utf-8-sig")   # Excel writes a BOM
+        df.columns = [str(c).strip() for c in df.columns]
         errors = validate(name, df)
         if errors:
             print(report(name, errors))

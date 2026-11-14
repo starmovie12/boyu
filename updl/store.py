@@ -317,6 +317,16 @@ class ParquetAppender:
             os.fsync(fh.fileno())
         os.replace(self.tmp, self.path)
 
+    def abort(self) -> None:
+        """After an error: drop the half-written file instead of publishing it."""
+        if self._writer is not None:
+            try:
+                self._writer.close()
+            finally:
+                self._writer = None
+        if self.tmp.exists():
+            self.tmp.unlink()
+
 
 def read_parquet(path, columns=None) -> pd.DataFrame:
     return pd.read_parquet(path, engine="pyarrow", columns=columns)

@@ -282,7 +282,9 @@ def _dispatch(cmd, args, settings, client, limiter, calendar, rlog, secrets, sle
             if not args.target:
                 print("Usage: python -m updl ingest <file_or_dir>")
                 return EXIT_OTHER_ERROR
-            run_ingest(settings, args.target, calendar=calendar)
+            res = run_ingest(settings, args.target, calendar=calendar)
+            if isinstance(res, dict) and res.get("status") == "INVALID":
+                return EXIT_SOME_NOT_OK                 # the file was not copied: a script must see it
             return EXIT_OK
 
         return EXIT_OK

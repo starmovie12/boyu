@@ -59,7 +59,8 @@ cloud ke 22 s se kai guna (ESTIMATE 1-2 min). Target "8 minute ke andar" phone p
 * **`python -m updl coverage`**: `data_coverage.csv` + `strategy_ready_days.csv` (har index-din: SPOT / FUT / OPT_BAND / OPT_WIDE / EVENT / SPREAD). Har batch ke aakhir mein ek line.
 * **Owner files**: events, constituents, corporate actions, participant OI ke templates + validators; galat file copy nahi hoti.
 * 14 default stocks ke ISIN asli Upstox master se; manifest ki "about 25 stocks" galti theek (14).
-* Tests: 78 passed.
+* R1 review: SPREAD READY sirf jab Recorder ne ~90% session record kiya; adhoora options din PARTIAL; Excel (BOM) wali CSV ab chalti hai; galat owner file par exit 10.
+* Tests: 80 passed.
 
 ## Baaki
 Derived extras (iv_daily, skew, vix_term, gamma_flip, vega), spread-report (Recorder data aane ke baad), Nifty50/Sensex stock lists (owner file), bhavcopy columns (real file chahiye).

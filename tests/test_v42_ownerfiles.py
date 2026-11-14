@@ -58,6 +58,21 @@ class TestOwnerFiles(unittest.TestCase):
             self.assertIn("usable_from_date", (s.external_dir / "participant_oi.csv").read_text())
             self.assertIn("2026-11-13", (s.external_dir / "participant_oi.csv").read_text())
 
+    def test_excel_bom_and_spaces_in_header_are_accepted_but_empty_cells_are_not(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            text = "\ufeff" + GOOD["events.csv"].replace("event_id,event_ts_ist", "event_id , event_ts_ist", 1)
+            _s, res, _out = self._run(tmp, "events.csv", text)
+            self.assertEqual(res["status"], "OK", res)
+        with tempfile.TemporaryDirectory() as tmp:
+            text = "event_id,event_ts_ist,name,class,source_url\nE1,2026-12-05T10:00:00+05:30,,RBI,https://x\n"
+            _s, res, _out = self._run(tmp, "events.csv", text)
+            self.assertEqual(res["status"], "INVALID")
+            self.assertIn("row 2: name khali hai", res["errors"])
+        with tempfile.TemporaryDirectory() as tmp:          # a dividend has no ratio: allowed
+            text = "symbol,ex_date,type,ratio,source_url\nX,2025-08-26,DIVIDEND,,https://nseindia.com/x\n"
+            _s, res, _out = self._run(tmp, "corporate_actions.csv", text)
+            self.assertEqual(res["status"], "OK", res)
+
     def test_bad_files_are_refused_with_row_numbers(self):
         for name, (text, expected) in BAD.items():
             with tempfile.TemporaryDirectory() as tmp:

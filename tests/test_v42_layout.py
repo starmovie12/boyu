@@ -119,6 +119,12 @@ class TestCoverage(unittest.TestCase):
             rec = settings.workdir / "recorder" / "NIFTY"
             rec.mkdir(parents=True)
             (rec / "2026-11-12.csv").write_text("local_ts,bid,ask\n", encoding="utf-8")
+            (rec / "2026-11-13.csv").write_text("local_ts,bid,ask\n", encoding="utf-8")      # short run: PARTIAL
+            (rec / "2026-11-10.csv").write_text("local_ts,bid,ask\n", encoding="utf-8")      # killed: no summary
+            (rec.parent / "summary.csv").write_text(
+                "date,ended,underlyings,expiries,every_sec,snapshots,chain_rows,ltp_rows,gaps,errors,mb\n"
+                "2026-11-12,x,NIFTY BANKNIFTY,x,60,200,1,1,0,0,1\n2026-11-12,x,NIFTY,x,60,180,1,1,0,0,1\n"
+                "2026-11-13,x,NIFTY,x,60,30,1,1,0,0,1\n", encoding="utf-8")
             lines = []
             res = run_coverage(settings, load_calendar(REF_DIR), start="2026-11-09", end="2026-11-13", say=lines.append)
             days = {r["trading_date"]: r for r in csv.DictReader(open(settings.reports_dir / "strategy_ready_days.csv",
@@ -129,12 +135,40 @@ class TestCoverage(unittest.TestCase):
                              ("READY", "READY", "READY", "READY"))
             self.assertEqual((d12["SPREAD"], d12["EVENT"], d12["FULL_READY"]), ("READY", "MISSING", "PARTIAL"))
             self.assertEqual(days["2026-11-11"]["SPREAD"], "MISSING")
+            self.assertEqual(days["2026-11-13"]["SPREAD"], "PARTIAL")          # 30 snapshots is not a day
+            from updl.coverage import _spread_status
+            self.assertEqual(_spread_status(rec / "2026-11-10.csv", None, 385)[0], "PARTIAL")
+            self.assertEqual(_spread_status(rec / "2026-11-12.csv", 380 * 60, None)[0], "PARTIAL")    # TABLE_GAP
             self.assertEqual(res["days"]["counts"]["price"], {"READY": 4})
             self.assertTrue(any("price-data READY 4" in x for x in lines))
             sets = {r["item"]: r for r in csv.DictReader(open(settings.reports_dir / "data_coverage.csv", encoding="utf-8"))}
             self.assertEqual(sets["D06"]["status"], "DELIVERED")
             self.assertEqual(sets["D18"]["status"], "OWNER-FILE-MISSING")
-            self.assertEqual(sets["REC"]["first_day"], "2026-11-12")
+            self.assertEqual(sets["REC"]["first_day"], "2026-11-10")
+            # a day whose options file exists but whose plan was never finished is not READY
+            ds = settings.reports_dir / "day_status.csv"
+            text = ds.read_text(encoding="utf-8").replace("2026-11-13,NIFTY,opt_1m,COMPLETE",
+                                                          "2026-11-13,NIFTY,opt_1m,NOT_DOWNLOADED")
+            self.assertIn("2026-11-13,NIFTY,opt_1m,NOT_DOWNLOADED", text)
+            ds.write_text(text, encoding="utf-8")
+            run_coverage(settings, load_calendar(REF_DIR), start="2026-11-13", end="2026-11-13", say=lines.append)
+            d13 = {(r["trading_date"], r["underlying"]): r for r in csv.DictReader(
+                open(settings.reports_dir / "strategy_ready_days.csv", encoding="utf-8"))}[("2026-11-13", "NIFTY")]
+            self.assertEqual((d13["OPT_BAND"], d13["PRICE_READY"]), ("PARTIAL", "PARTIAL"))
+            self.assertFalse(list(settings.reports_dir.glob("*.tmp")))
+
+    def test_parquet_appender_abort_publishes_nothing(self):
+        from updl.store import ParquetAppender
+        with tempfile.TemporaryDirectory() as tmp:
+            w = ParquetAppender(Path(tmp) / "a.parquet")
+            w.append(pd.DataFrame({"x": [1, 2]}))
+            w.abort()
+            self.assertEqual(list(Path(tmp).iterdir()), [])
+            w = ParquetAppender(Path(tmp) / "b.parquet")
+            w.append(pd.DataFrame({"x": [1, 2]}))
+            w.append(pd.DataFrame({"x": [3]}))
+            w.close()
+            self.assertEqual(read_parquet(Path(tmp) / "b.parquet")["x"].tolist(), [1, 2, 3])
 
 
 if __name__ == "__main__":

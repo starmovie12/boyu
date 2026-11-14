@@ -217,7 +217,7 @@ def package_week(settings: Settings, tag: str, start: dt.date, end: dt.date, val
     if xcheck.exists():                 # small: the whole exchange-side folder travels with every batch
         shutil.copytree(xcheck, week_dir / "xcheck_csv", copy_function=shutil.copyfile)
     for rep in ("health.csv", "health_summary.txt", "reconciliation.csv", "day_status.csv", "holes.csv",
-                "strategy_ready_days.csv", "data_coverage.csv"):
+                "strategy_ready_days.csv"):          # data_coverage.csv: only fresh, from `coverage` / export
         if (settings.reports_dir / rep).exists():
             shutil.copyfile(settings.reports_dir / rep, week_dir / rep)
     per_index = ", ".join(f"{u} {c['option_rows']} option-minutes / {c['contracts']} contracts" for u, c in lay.items())
