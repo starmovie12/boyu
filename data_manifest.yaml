@@ -12,8 +12,10 @@ params:
   STRIKE_MARGIN_STEPS: 6              # minimum margin each side of the day range, in strike steps
   STRIKE_DELTA_MARGIN_K: 0.6          # extra margin = K x spot x (VIX_day_high/100) x sqrt(calendar_DTE/365); band margin = max(STRIKE_MARGIN_STEPS x step, that). Keeps delta 0.30..0.70 strikes on long-dated (monthly) contracts
   WIDE_CHAIN_STEPS: 20                # P1 only (OI walls, Max Pain, GEX, PCR); band = [day_low - 20 steps, day_high + 20 steps]
-  RATE_CALLS_PER_MIN: 30              # conservative: Upstox docs show conflicting limits (25/250/1000 vs 50/500/2000 per s/min/30min); probe measures, owner may raise
-  RATE_MAX_PER_30MIN: 900             # 90% of the lower documented figure (1000)
+  RATE_CALLS_PER_MIN: 240             # v4: official rate page (read 12 Nov 2026) = 500/min and 2000 per 30 min for standard APIs; live test 14 Nov 2026 ran 640+/min without a 429. 240 keeps a wide margin; a 429 halves it automatically. Lower with --rate
+  RATE_MAX_PER_30MIN: 1800            # 90% of the documented 2000 per 30 min (override: --max-per-30min)
+  WORKERS: 4                          # parallel download workers; all share ONE rate limiter
+  WINDOW_DAYS: 7                      # `continue` batch size in calendar days (0 = old calendar-month mode)
   DATA_RIGHTS: "UNVERIFIED"           # OK | MINIMAL | NOT_ALLOWED | UNVERIFIED
 instruments:
   NIFTY:     {spot_key: "NSE_INDEX|Nifty 50", exchange: NSE, fo_segment: NSE_FO, expiry: weekly_tuesday, strike_step_default: 50}
@@ -32,7 +34,7 @@ items:
   - {id: D08, item: wide-chain option contracts 1m (OI walls, Max Pain, GEX, PCR), instruments: [NIFTY, BANKNIFTY, SENSEX], endpoint: expired_else_v3, unit: 1minute, window: [test], fields: [ts_open,c,v,oi], priority: P1, plan: [A], est_calls: "about 2.4x D06"}
   - {id: D09, item: cash stocks 1m, heavyweights + BankNifty banks, endpoint: v3_historical, unit: minutes, interval: 1, window: [warmup_1m, test], fields: [ts_open,o,h,l,c,v], priority: P0, plan: [A,B,C], est_calls: "N_stocks x 9 (about 25 x 9 = 225)"}
   - {id: D10, item: cash stocks 1m, Nifty50 + Sensex constituents (list undecided; skipped until stocks.csv has them), endpoint: v3_historical, unit: minutes, interval: 1, window: [test], fields: [ts_open,o,h,l,c,v], priority: P1, plan: [A,B,C], est_calls: "N_new_stocks x 7 (about 45 x 7 = 315)"}
-  - {id: D11, item: global indicators and GIFT Nifty 1m (USD INR, Brent, WTI, GIFT NIFTY), endpoint: v3_historical, unit: minutes, interval: 1, window: [test], fields: [ts_open,o,h,l,c], priority: P2, plan: [A,B,C], est_calls: "4 x 7 = 28"}
+  - {id: D11, item: global indicators and GIFT Nifty 1m (USD INR, Brent, WTI, GIFT NIFTY), endpoint: v3_historical, unit: minutes, interval: 1, window: [test], fields: [ts_open,o,h,l,c], priority: P2, plan: [A,B,C], est_calls: "13 names x 1 call per week"}
   - {id: D12, item: instrument master snapshots (today; NOT point in time), source: assets.upstox.com NSE.json.gz BSE.json.gz global.json.gz, priority: P0, plan: [A,B,C], est_calls: 0}
   - {id: D13, item: NSE F&O UDiFF common bhavcopy daily (all strikes OHLC, volume, OI); used by the validator to RECONCILE candles (close, volume, OI), source: owner-supplied external/bhavcopy/, priority: P1, plan: [A,B,C], note: "P0 only under Plan C"}
   - {id: D14, item: NSE participant-wise F&O OI daily, source: owner-supplied external/participant_oi.csv (exact NSE file name UNVERIFIED), priority: P1, plan: [A,B,C], note: usable from NEXT session only}

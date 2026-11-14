@@ -1,9 +1,21 @@
-# globals.yaml (table_version 2) -- names looked up in global.json.gz for D11 and probe P17. Tag ASSUMPTION.
-# The match is by exact trading_symbol/name first, then by "contains". A name that does not resolve is logged, never skipped silently.
-table_version: 2
-tag: ASSUMPTION
+# globals.yaml (table_version 3) -- names looked up in global.json.gz for D11 and probe P17.
+# v4: these are the exact 13 names in Upstox's global master (read live 14 Nov 2026, tag SOURCE). The old
+# "Oil Brent" / "Oil WTI" spellings never matched, so crude was never downloaded. A name that is not in the
+# master is reported as UNRESOLVED_NAME and never requested with a made-up key. There is no US VIX, dollar
+# index, gold or bond-yield instrument in this master.
+table_version: 3
+tag: SOURCE
 names:
   - USD INR
-  - Oil Brent
-  - Oil WTI
   - GIFT NIFTY
+  - Oil (Brent)
+  - Oil (WTI)
+  - S&P
+  - US Tech 100
+  - DOW JONES
+  - US 30
+  - NIKKEI 225
+  - HANG SENG
+  - DAX
+  - FTSE 100
+  - CAC 40

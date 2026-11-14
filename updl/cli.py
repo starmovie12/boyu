@@ -2,13 +2,12 @@
 
 Commands:
   probe | plan | download | continue | month | compact | validate | derive | report | handoff | verify | ingest
+  continue = one WEEK per run (newest first, then one week further back each time); `--window-days 0` = old month mode
   export (phone CSV zip, option chain at time T) | record (live option-chain Recorder)
 """
 from __future__ import annotations
 
 import argparse
-import sys
-from pathlib import Path
 from typing import Optional
 
 from .client import HttpClient, RateLimiter
@@ -19,15 +18,18 @@ from .export import DEFAULT_EVERY_MIN, run_export
 from .handoff import run_handoff, run_report, run_verify
 from .ingest import run_ingest
 from .messages import DATA_RIGHTS_WARNING, RIGHTS_NOT_ALLOWED
+from .calsync import cached_calendar
 from .monthly import run_monthly_continue
 from .plan import run_download, run_plan_command
 from .probe import run_probe
+from .progress import Progress
 from .recorder import run_record
 from .runlog import RunLog
 from .sessions import load_calendar
 from .store import compact
 from .tokens import load_tokens
 from .validate import run_validate
+from .weekly import DEFAULT_WINDOW_DAYS, run_week_batches
 
 COMMANDS = ("probe", "plan", "download", "continue", "month", "compact",
             "validate", "derive", "report", "handoff", "verify", "ingest", "export", "record")
@@ -36,7 +38,7 @@ COMMANDS = ("probe", "plan", "download", "continue", "month", "compact",
 def build_parser() -> argparse.ArgumentParser:
     p = argparse.ArgumentParser(
         prog="python -m updl",
-        description="Read-only Upstox historical market-data downloader, validator & derived-table builder (with Termux 1-month continue mode)."
+        description="Read-only Upstox historical market-data downloader, validator & derived-table builder (Termux: one week per `continue`)."
     )
     p.add_argument("command", choices=COMMANDS, help="Stage command to execute")
     p.add_argument("target", nargs="?", default=None, help="File or directory path for `ingest`")
@@ -54,10 +56,20 @@ def build_parser() -> argparse.ArgumentParser:
     p.add_argument("--log-level", default="INFO", help="Logging level")
     p.add_argument("--no-refetch-last-day", action="store_true", help="Disable re-fetching last day on next run")
     p.add_argument("--month-step", action="store_true",
-                   help="Download 1 month at a time going backwards (same as `continue` command)")
-    p.add_argument("--today", default=None, help="Override today's date in IST (YYYY-MM-DD) for month continue mode")
-    p.add_argument("--phone-dir", default=None, help="Optional phone output folder for monthly zip packages")
-    p.add_argument("--with-warmup", action="store_true", help="Include warmup window during 1-month continue mode")
+                   help="download: run one `continue` batch instead of the whole window")
+    p.add_argument("--today", default=None, help="Override today's date in IST (YYYY-MM-DD) for continue mode")
+    p.add_argument("--phone-dir", default=None,
+                   help="Phone output folder (default: Download/BOYU_Data, or env UPDL_PHONE_DIR)")
+    p.add_argument("--with-warmup", action="store_true", help="Old month mode only: include the option warm-up window")
+    p.add_argument("--window-days", type=int, default=None,
+                   help=f"continue: calendar days per batch (default {DEFAULT_WINDOW_DAYS}; 0 = old calendar-month mode)")
+    p.add_argument("--weeks", type=int, default=1, help="continue: run this many batches in one go (default 1)")
+    p.add_argument("--reset-cursor", action="store_true",
+                   help="continue: forget the batch cursor and start again at today (covered days are not re-downloaded)")
+    p.add_argument("--back-to", default=None, help="continue: oldest date to walk back to (default 2024-10-01)")
+    p.add_argument("--workers", type=int, default=None, help="Parallel download workers (default from manifest, 1..8)")
+    p.add_argument("--max-per-30min", type=int, default=None, help="Override RATE_MAX_PER_30MIN")
+    p.add_argument("--profile", action="store_true", help="continue: print seconds per stage at the end")
     p.add_argument("--synthetic-fixture", action="store_true", help="Label output as SYNTHETIC_FIXTURE")
     p.add_argument("--every", type=int, default=None,
                    help="export: minutes between chain snapshots (default 15); record: seconds between snapshots (default 60)")
@@ -93,6 +105,10 @@ def main(argv: Optional[list] = None, transport=None, environ=None, sleep=None) 
         )
         if args.no_refetch_last_day:
             settings.refetch_last_day = False
+        if args.max_per_30min is not None:
+            settings.set_param("RATE_MAX_PER_30MIN", int(args.max_per_30min))
+        workers = args.workers if args.workers is not None else int(settings.params.get("WORKERS", 1))
+        settings.workers = max(1, min(8, int(workers)))
 
         if settings.data_rights == "NOT_ALLOWED":
             print(RIGHTS_NOT_ALLOWED)
@@ -101,7 +117,7 @@ def main(argv: Optional[list] = None, transport=None, environ=None, sleep=None) 
         tokens = load_tokens(environ=environ)
         secrets = tokens.secret_values()
         rlog = RunLog(logs_dir=None if settings.dry_run else settings.logs_dir, secrets=secrets)
-        calendar = load_calendar(settings.reference_dir)
+        calendar = cached_calendar(settings, load_calendar(settings.reference_dir))   # + API facts already cached
 
         kw_lim = {"calls_per_min": settings.rate_per_min, "max_per_30min": settings.max_per_30min}
         if sleep is not None:
@@ -124,12 +140,35 @@ def main(argv: Optional[list] = None, transport=None, environ=None, sleep=None) 
             return EXIT_OK
 
         if cmd in ("continue", "month") or (cmd == "download" and args.month_step):
-            run_monthly_continue(
-                settings, client, calendar=calendar,
-                today_override=args.today, with_warmup=args.with_warmup,
-                phone_dir=args.phone_dir, run_id=rlog.run_id,
-                log=rlog, secrets=secrets
-            )
+            window_days = args.window_days if args.window_days is not None else int(
+                settings.params.get("WINDOW_DAYS", DEFAULT_WINDOW_DAYS))
+            if window_days <= 0:      # the old calendar-month mode, unchanged
+                run_monthly_continue(
+                    settings, client, calendar=calendar,
+                    today_override=args.today, with_warmup=args.with_warmup,
+                    phone_dir=args.phone_dir, run_id=rlog.run_id,
+                    log=rlog, secrets=secrets
+                )
+                return EXIT_OK
+            progress = None
+            if not settings.dry_run:
+                progress = Progress(limiter=limiter).start()
+                if sleep is None:          # never sleep silently: waits are sliced and the line keeps moving
+                    client.sleep = progress.sleep
+                    limiter.sleep = progress.sleep
+            try:
+                res = run_week_batches(
+                    settings, client, calendar=load_calendar(settings.reference_dir),
+                    today_override=args.today, window_days=window_days, weeks=args.weeks,
+                    phone_dir=args.phone_dir, run_id=rlog.run_id, log=rlog, secrets=secrets,
+                    reset_cursor=args.reset_cursor, until=args.back_to, progress=progress
+                )
+            finally:
+                if progress is not None:
+                    progress.stop()
+            if args.profile and res.get("stage_seconds"):
+                print("PROFILE (seconds): " + ", ".join(f"{k}={v:.1f}" for k, v in res["stage_seconds"].items())
+                      + f" | total={res.get('seconds')} | calls={res.get('calls')}")
             return EXIT_OK
 
         if cmd == "download":
