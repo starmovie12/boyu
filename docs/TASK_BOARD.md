@@ -16,8 +16,8 @@ Order: open PR A -> time-critical B1, B2 (Recorder must be ready before Mon 16 N
 | A5 | Run lock, SQLite integrity_check, stale .tmp cleanup | medium | Fable | Max | DONE | in PR #3; tests/test_v42_repair.py |
 | B1 | Exchange-side data now: PCR, max pain, OI, change-in-OI, FII/DII (retention ~2 weeks) | medium | Fable | Extra High | DONE | in PR #3; tests/test_v42_marketinfo.py; NOT RUN LIVE |
 | B2 | Recorder v2 (REST): multi-expiry, spot/VIX/future LTP, gaps file, daily summary, shared limiter | medium | Fable | Extra High | DONE | in PR #3; tests/test_v42_recorder.py; NOT RUN LIVE |
-| C3 | Fewer calls: whole contract life per call where it helps; optional spot/VIX fast lane from Jan 2022 | medium | Fable | Extra High | IN-PROGRESS | measure calls per week before/after |
-| C1 | Per-underlying export: spot_1m.csv, contracts.csv, options_1m/<expiry>.csv, futures_1m.csv, ai_ready parquet, 40 MB split | big | Opus | Extra High | TODO | switch model before starting |
+| C3 | Fewer calls: whole contract life per call where it helps; optional spot/VIX fast lane from Jan 2022 | medium | Fable | Extra High | DONE | `history` fast lane built; whole-life chunks analysed and not built (DECISIONS 33) |
+| C1 | Per-underlying export: spot_1m.csv, contracts.csv, options_1m/<expiry>.csv, futures_1m.csv, ai_ready parquet, 40 MB split | big | Opus | Extra High | TODO | NEXT: owner switches to Opus 5.5 (Extra High), then `continue` |
 | C2 | `coverage` + strategy_ready_days.csv + README_FOR_AI.md | medium | Opus | High | TODO | after C1 |
 | C4 | Owner-file schemas + validators (events, constituents, corporate actions, participant OI); stock lists only from an official page; derived extras | big | Opus | High | TODO | after C2 |
 | R1 | Code review / integration test of the Fable work (A, B) | medium | Opus | High | TODO | with the C group |

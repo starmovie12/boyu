@@ -5,6 +5,7 @@ Commands:
   continue = one WEEK per run (newest first, then one week further back each time); `--window-days 0` = old month mode
   export (phone CSV zip, option chain at time T) | record (live option-chain Recorder)
   repair (queue failed chunks again; good chunks are never downloaded twice)
+  history (fast lane: index + VIX 1-minute and daily from Jan 2022, no options; `--back-to DATE` to shorten)
 """
 from __future__ import annotations
 
@@ -32,11 +33,11 @@ from .sessions import load_calendar
 from .store import compact
 from .tokens import load_tokens
 from .validate import run_validate
-from .weekly import DEFAULT_WINDOW_DAYS, run_week_batches
+from .weekly import DEFAULT_WINDOW_DAYS, run_history, run_week_batches
 
 COMMANDS = ("probe", "plan", "download", "continue", "month", "compact",
-            "validate", "derive", "report", "handoff", "verify", "ingest", "export", "record", "repair")
-LOCKED_COMMANDS = ("download", "continue", "month", "repair")     # one state writer per workdir (record: own lock)
+            "validate", "derive", "report", "handoff", "verify", "ingest", "export", "record", "repair", "history")
+LOCKED_COMMANDS = ("download", "continue", "month", "repair", "history")     # one state writer per workdir (record: own lock)
 
 
 def build_parser() -> argparse.ArgumentParser:
@@ -70,7 +71,7 @@ def build_parser() -> argparse.ArgumentParser:
     p.add_argument("--weeks", type=int, default=1, help="continue: run this many batches in one go (default 1)")
     p.add_argument("--reset-cursor", action="store_true",
                    help="continue: forget the batch cursor and start again at today (covered days are not re-downloaded)")
-    p.add_argument("--back-to", default=None, help="continue: oldest date to walk back to (default 2024-10-01)")
+    p.add_argument("--back-to", default=None, help="continue: oldest date to walk back to (default 2024-10-01); history: first day (default 2022-01-03)")
     p.add_argument("--workers", type=int, default=None, help="Parallel download workers (default from manifest, 1..8)")
     p.add_argument("--max-per-30min", type=int, default=None, help="Override RATE_MAX_PER_30MIN")
     p.add_argument("--profile", action="store_true", help="continue: print seconds per stage at the end")
@@ -155,6 +156,21 @@ def _dispatch(cmd, args, settings, client, limiter, calendar, rlog, secrets, sle
     if True:
         if cmd == "repair":
             run_repair(settings, calendar=calendar)
+            return EXIT_OK
+
+        if cmd == "history":
+            progress = None
+            if not settings.dry_run:
+                progress = Progress(limiter=limiter).start()
+                if sleep is None:
+                    client.sleep = progress.sleep
+                    limiter.sleep = progress.sleep
+            try:
+                run_history(settings, client, calendar=load_calendar(settings.reference_dir), today_override=args.today,
+                            start=args.back_to, run_id=rlog.run_id, log=rlog, secrets=secrets, progress=progress)
+            finally:
+                if progress is not None:
+                    progress.stop()
             return EXIT_OK
 
         if cmd == "probe":

@@ -399,3 +399,25 @@ class TestVectorMaths(unittest.TestCase):
 
 if __name__ == "__main__":
     unittest.main()
+
+
+class TestHistoryFastLane(unittest.TestCase):
+    def test_spot_and_vix_history_costs_one_call_per_28_days_and_nothing_the_second_time(self):
+        from updl.weekly import run_history
+        with tempfile.TemporaryDirectory() as tmp:
+            tr = Wrap()
+            settings, cli = _setup(tmp, tr, items=None)
+            tr.urls.clear()
+            res = run_history(settings, cli, calendar=load_calendar(REF_DIR), today_override=TODAY, start="2026-08-03")
+            self.assertTrue(res["completed"])
+            self.assertEqual((res["start"], res["end"]), ("2026-08-03", "2026-11-13"))
+            one_min = [u for u in tr.urls if "/minutes/1/" in u and not u.endswith("2026-11-13/2026-11-13")]
+            days = [u for u in tr.urls if "/days/1/" in u]
+            self.assertEqual(len(one_min), 2 * 4)        # NIFTY + VIX (fixture), 103 calendar days = 4 chunks of 28
+            self.assertEqual(len(days), 2)
+            self.assertFalse(any("NSE_FO" in u or "expired-instruments/historical" in u for u in tr.urls))
+            self.assertTrue(any(Path(tmp).glob("wd/store/dev/spot_1m/underlying=NIFTY/trading_date=2026-08-03/part-0.parquet")))
+            tr.urls.clear()
+            res2 = run_history(settings, cli, calendar=load_calendar(REF_DIR), today_override=TODAY, start="2026-08-03")
+            self.assertEqual(len([u for u in tr.urls if "/minutes/1/" in u and not u.endswith("2026-11-13/2026-11-13")]), 0)
+            self.assertTrue(res2["completed"])

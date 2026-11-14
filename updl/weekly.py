@@ -469,3 +469,56 @@ def _days(a: dt.date, b: dt.date) -> list:
         out.append(d)
         d += dt.timedelta(days=1)
     return out
+
+
+# ---- fast lane: index and VIX history without options -------------------------------------------------------
+SPOT_HISTORY_FROM = "2022-01-03"      # V3 1-minute candles start here (verified live 14 Nov 2026)
+HISTORY_ITEMS = ["D12", "D01", "D02", "D03", "D04"]
+
+
+def run_history(settings: Settings, client: HttpClient, calendar: Optional[Calendar] = None,
+                today_override: Optional[str] = None, start: Optional[str] = None, run_id: str = "r1", log=None,
+                secrets=(), progress=None) -> dict:
+    """`python -m updl history`: spot and India VIX, 1-minute and daily, from Jan 2022 to the newest served day.
+    About 250 calls for the 3 indices + VIX (one call per instrument per 28 days); days already covered are
+    skipped, so a second run costs nothing. Options are not touched (they come week by week)."""
+    log = log or (lambda *a, **k: None)
+    say = progress.note if progress is not None else print
+    base = calendar or load_calendar(settings.reference_dir)
+    today = to_date(today_override) if today_override else today_ist()
+    settings.refetch_last_day = False
+    settings.warmup_items = set()
+    settings.progress = progress
+    settings.items_filter = list(HISTORY_ITEMS)
+    first = to_date(start) if start else to_date(SPOT_HISTORY_FROM)
+    if settings.dry_run:
+        end = base.last_completed_trading_day(today)
+    else:
+        _load_rate_window(settings, client.limiter)
+        _ensure_probe(settings, client, base, secrets, say)
+        end, _pending = detect_data_through(settings, client, cached_calendar(settings, base), today)
+    settings.set_param("TEST_START", iso(first))
+    settings.set_param("TEST_END", iso(end))
+    say(f"[History] Index + VIX ka 1-minute aur daily data: {iso(first)} se {iso(end)} (options nahi).")
+    since, before = utc_iso(), client.calls_made
+    if progress is not None and not settings.dry_run:
+        progress.stage(1)
+    res = run_download(settings, client, base, run_id=run_id, log=log, include_warmup=False, secrets=secrets)
+    if settings.dry_run:
+        return {"dry_run": True, "plan_summary": res}
+    _save_rate_window(settings, client.limiter)
+    if res.get("interrupted") or res.get("stopped_by_limit"):
+        if progress is not None:
+            progress.finish()
+        say("[History] Adhura ruka. Wahi command dobara chalao, kaam wahin se aage badhega.")
+        return {**res, "completed": False}
+    if progress is not None:
+        progress.stage(2)
+    out = compact(settings, base, log=log, since_utc=since, tick=progress.tick if progress is not None else None)
+    if progress is not None:
+        progress.finish()
+    calls = client.calls_made - before
+    say(f"[History] Ho gaya: {calls} calls, {out['files_written']} din-files likhi. Dobara chalane par jo aa chuka "
+        f"hai woh download nahi hoga.")
+    return {"completed": True, "calls": calls, "files_written": out["files_written"], "start": iso(first),
+            "end": iso(end)}
