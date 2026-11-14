@@ -1,4 +1,7 @@
 # sessions.yaml  (table_version 2)  -- normal sessions, IST.
+# v4: for days in state/calendar_cache.json the Upstox timings API decides (NFO and BFO 15:40 from 3 Aug 2026 was
+# confirmed live). For 8 Dec 2026 that API still answered 15:40 while the rows below say 15:45 from 7 Dec
+# (SEBI circular 15 Oct 2026): UNVERIFIED which one the exchanges implemented; the API wins for cached days.
 # Expected 1-minute bars of a day = whole minutes from open to close.
 # "to: null" = valid until superseded, so this table never expires.
 # tag: SOURCE | SOURCE_SECONDARY | FILE_CLAIM | UNVERIFIED | ASSUMPTION
@@ -22,5 +25,5 @@ sessions:
   # Global instruments (USD INR, Brent, WTI, GIFT NIFTY) trade outside Indian hours: no expected bar count.
   - {class: global_indicator, from: "2025-04-01", to: null,        open: null,    close: null,    tag: ASSUMPTION, note: "no expected bar count; validator only checks structure"}
 special_sessions:
-  - {date: "2026-11-08", session_type: MUHURAT,       open: null,    close: null,    tag: UNVERIFIED, note: "Sunday Muhurat; timings UNVERIFIED; excluded from normal-day counts"}
-  - {date: "2026-02-01", session_type: BUDGET_SUNDAY, open: "09:15", close: "15:30", tag: SOURCE_SECONDARY, note: "Sunday Budget session; only matters if the warm-up reaches it"}
+  - {date: "2026-11-08", session_type: MUHURAT,       open: null,    close: null,    tag: SOURCE, note: "Sunday Muhurat. Upstox holidays API (read 14 Nov 2026): NSE/BSE 14:20-15:30, NFO/BFO 14:20-15:40. Excluded from normal-day counts and not downloaded as a trading day"}
+  - {date: "2026-02-01", session_type: BUDGET_SUNDAY, open: "09:15", close: "15:30", tag: SOURCE, note: "Sunday Budget session (Upstox holidays API: SPECIAL_TIMING 09:15-15:30); not downloaded as a trading day"}

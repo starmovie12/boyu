@@ -13,13 +13,15 @@ import csv
 import datetime as dt
 import json
 import tempfile
+import threading
+from concurrent.futures import FIRST_COMPLETED, ThreadPoolExecutor, wait
 from collections import defaultdict
 from pathlib import Path
 from typing import Optional
 
 import pandas as pd
 
-from .client import MASTER_URLS, HttpClient, expired_candle_path, v3_candle_path
+from .client import MASTER_URLS, HttpClient, estimate_minutes, expired_candle_path, v3_candle_path
 from .config import ITEM_ORDER, PLANS, Settings, load_yaml
 from .errors import (ApiError, BudgetExceeded, PlusRequired, RetryExhausted, RightsNotAllowed,
                      TokenExpired)
@@ -35,7 +37,7 @@ from .state import (DONE, EMPTY_OK, FAILED_PERMANENT, FAILED_RETRYABLE, Catalog,
                     State, cov_key)
 from .store import (ITEM_TABLE, SOURCE_EXPIRED, SOURCE_V3, atomic_write_bytes, cleanup_temp_files,
                     parse_candles, read_raw_payload, write_parquet, write_raw)
-from .timeutil import iso, now_ist, to_date, utc_iso
+from .timeutil import IST, iso, now_ist, to_date, today_ist, utc_iso
 
 
 def filter_contracts_point_in_time(expired_list: list, master_list: list, ref_today: dt.date,
@@ -243,6 +245,7 @@ def build_selection_plan(settings: Settings, calendar: Optional[Calendar] = None
     try:
         spot_map, vix_map = _spot_and_vix_stats(settings, state)
         plan_rows = []
+        planned_cov = {}
         calls_by_item = defaultdict(int)
         skipped_items = {}
 
@@ -250,6 +253,7 @@ def build_selection_plan(settings: Settings, calendar: Optional[Calendar] = None
             if item_id not in settings.items or not settings.item_selected(item_id):
                 continue
             item = settings.items[item_id]
+            inc_w = settings.warmup_for(item_id, include_warmup)
             if plan_name not in item.get("plan", []) and not (plan_name == "A_PARTIAL" and "A" in item.get("plan", [])):
                 skipped_items[item_id] = f"SKIPPED_PLAN_{plan_name}"
                 continue
@@ -268,7 +272,7 @@ def build_selection_plan(settings: Settings, calendar: Optional[Calendar] = None
                         sk, _ = resolve_spot_key(settings.spot_key(und), masters.get(exch, []))
                     except Exception:
                         sk = settings.spot_key(und)
-                    w0, w1 = _window_bounds(settings, calendar, item.get("window", []), und, include_warmup)
+                    w0, w1 = _window_bounds(settings, calendar, item.get("window", []), und, inc_w)
                     tdays = calendar.trading_days(w0, w1)
                     cov = state.covered_dates(cov_key(sk, intv)) if state else set()
                     uncov = [d for d in tdays if d not in cov]
@@ -286,7 +290,7 @@ def build_selection_plan(settings: Settings, calendar: Optional[Calendar] = None
                 cap = 3000 if is_daily else v3_cap
                 intv = "1d" if is_daily else "1m"
                 sk = settings.spot_key("INDIAVIX") if "INDIAVIX" in settings.instruments else "NSE_INDEX|India VIX"
-                w0, w1 = _window_bounds(settings, calendar, item.get("window", []), "INDIAVIX", include_warmup)
+                w0, w1 = _window_bounds(settings, calendar, item.get("window", []), "INDIAVIX", inc_w)
                 tdays = calendar.trading_days(w0, w1)
                 cov = state.covered_dates(cov_key(sk, intv)) if state else set()
                 uncov = [d for d in tdays if d not in cov]
@@ -303,7 +307,7 @@ def build_selection_plan(settings: Settings, calendar: Optional[Calendar] = None
                 stock_rows = _ensure_stocks_csv(settings, masters.get("NSE", []))
                 p0_rows = [r for r in stock_rows if r.get("group") in ("HEAVY", "BANK")]
                 seen_syms = set()
-                w0, w1 = _window_bounds(settings, calendar, item.get("window", []), "NIFTY", include_warmup)
+                w0, w1 = _window_bounds(settings, calendar, item.get("window", []), "NIFTY", inc_w)
                 tdays = calendar.trading_days(w0, w1)
                 for r in p0_rows:
                     sym = (r.get("symbol") or "").strip()
@@ -361,7 +365,12 @@ def build_selection_plan(settings: Settings, calendar: Optional[Calendar] = None
                 w0, w1 = _window_bounds(settings, calendar, item.get("window", []), "NIFTY", False)
                 tdays = calendar.trading_days(w0, w1)
                 for gname in g_cfg.get("names", []):
-                    gk = find_global(g_rows, gname) or f"GLOBAL|{gname}"
+                    gk = find_global(g_rows, gname)
+                    if gk is None and g_rows:
+                        # v4: a name that is not in global.json.gz is reported, never requested with a made-up key
+                        skipped_items[f"D11:{gname}"] = "UNRESOLVED_NAME"
+                        continue
+                    gk = gk or f"GLOBAL|{gname}"
                     cov = state.covered_dates(cov_key(gk, "1m")) if state else set()
                     uncov = [d for d in tdays if d not in cov]
                     chks = chunk_days(uncov, v3_cap)
@@ -375,8 +384,17 @@ def build_selection_plan(settings: Settings, calendar: Optional[Calendar] = None
 
             elif item_id == "D07":
                 for und in [u for u in item.get("instruments", []) if u in settings.instruments]:
+                    # v4: an estimate of the list calls still to make (lists already cached in the catalog are
+                    # skipped; the old figure counted every expiry ever seen, e.g. 593 for one month)
                     exps = catalog.expiries(und) if catalog else []
-                    n_calls = 1 + (len(exps) * 2 if exps else 12)
+                    w0, w1 = _window_bounds(settings, calendar, ["warmup_option", "test"], und,
+                                            settings.warmup_for("D06", include_warmup), oldest_opt)
+                    rel = [e for e in exps if w0 <= e <= w1 + dt.timedelta(days=35) and e < today_ist()]
+                    if catalog and exps:
+                        todo = [e for e in rel if catalog.get_kv(f"d07:{und}:OPT:{iso(e)}") != "1"]
+                        n_calls = 1 + len(todo) + len([e for e in monthly_expiries(exps) if e in todo])
+                    else:
+                        n_calls = 1 + 2 * (max(1, (w1 - w0).days // 7) + 5)
                     calls_by_item["D07"] += n_calls
 
             elif item_id in ("D05", "D06", "D08"):
@@ -395,11 +413,16 @@ def build_selection_plan(settings: Settings, calendar: Optional[Calendar] = None
                         sk, _ = resolve_spot_key(settings.spot_key(und), masters.get(exch, []))
                     except Exception:
                         sk = settings.spot_key(und)
-                    w0, w1 = _window_bounds(settings, calendar, item.get("window", []), und, include_warmup, oldest_opt)
+                    w0, w1 = _window_bounds(settings, calendar, item.get("window", []), und, inc_w, oldest_opt)
                     tdays = calendar.trading_days(w0, w1)
                     m_contracts = listed_contracts(masters.get(exch, []), sk,
                                                    kinds=("FUT",) if item_id == "D05" else ("CE", "PE"))
-                    e_contracts = catalog.contracts(und, kind="FUT" if item_id == "D05" else "OPT") if catalog else []
+                    # v4 (found on the first real run): the catalog also stores TODAY's listed contracts
+                    # (source "listed"). Passing those as "expired" sent keys like NSE_FO|61471 to the expired
+                    # endpoint, which rejects them (HTTP 400 UDAPI1021): every still-listed option and future
+                    # failed. Only rows that came from the expired-contract API are expired contracts.
+                    e_contracts = [c for c in catalog.contracts(und, kind="FUT" if item_id == "D05" else "OPT")
+                                   if c.get("source") == "expired"] if catalog else []
                     by_exp = filter_contracts_point_in_time(e_contracts, m_contracts, settings.test_end)
                     all_exps = sorted(by_exp.keys())
 
@@ -459,7 +482,13 @@ def build_selection_plan(settings: Settings, calendar: Optional[Calendar] = None
                         c = contract_obj[ck]
                         cap_c = v3_cap if c.source == "listed" else exp_cap
                         cov = state.covered_dates(cov_key(ck, "1m")) if state else set()
+                        # v4: D06 (band) and D08 (wide chain) select many of the same contract-days; a day
+                        # already planned in this run is not requested a second time
+                        seen = planned_cov.setdefault(ck, set())
+                        cov = cov | seen
                         chks = contract_chunks(cdays, cov, cap_c, calendar)
+                        for _f, _t, _dd in chks:
+                            seen.update(_dd)
                         calls_by_item[item_id] += len(chks)
                         plan_rows.append({
                             "item_id": item_id, "underlying": und, "expiry": iso(c.expiry_date),
@@ -485,7 +514,9 @@ def build_selection_plan(settings: Settings, calendar: Optional[Calendar] = None
             write_parquet(df_plan, out_parquet_path, {"plan": plan_name})
 
         total_calls = sum(calls_by_item.values())
-        est_minutes = total_calls / max(1.0, settings.rate_per_min)
+        # v4: honest estimate. The rolling 30-minute cap limits throughput whatever --rate says.
+        used = settings.progress.limiter.window_used() if getattr(settings.progress, "limiter", None) else 0
+        est_minutes = estimate_minutes(total_calls, settings.rate_per_min, settings.max_per_30min, used)
         return {
             "plan": plan_name,
             "calls_by_item": dict(calls_by_item),
@@ -503,15 +534,25 @@ def build_selection_plan(settings: Settings, calendar: Optional[Calendar] = None
             catalog.close()
 
 
+def _say(settings: Settings, text: str) -> None:
+    """Print a full line; with a live progress line active it is printed above that line."""
+    prog = getattr(settings, "progress", None)
+    if prog is not None:
+        prog.note(text)
+    else:
+        print(text)
+
+
 def print_plan_summary(summary: dict, settings: Settings):
-    print(f"Plan: {summary['plan']} | Window: {iso(settings.test_start)} .. {iso(settings.test_end)}")
+    _say(settings, f"Plan: {summary['plan']} | Window: {iso(settings.test_start)} .. {iso(settings.test_end)}")
     for item_id in ITEM_ORDER:
         if item_id in summary["calls_by_item"]:
-            print(f"  {item_id}: {summary['calls_by_item'][item_id]} calls")
+            _say(settings, f"  {item_id}: {summary['calls_by_item'][item_id]} calls" + (" (est.)" if item_id == "D07" else ""))
     for k, reason in summary.get("skipped", {}).items():
-        print(f"  {k}: {reason}")
-    print(f"Total API calls: {summary['total_calls']} | Rate: {settings.rate_per_min}/min | "
-          f"Est. time: {summary['estimated_minutes']} min ({summary['estimated_hours']} hrs)")
+        _say(settings, f"  {k}: {reason}")
+    _say(settings, f"Total API calls: {summary['total_calls']} | Rate: {settings.rate_per_min:g}/min, max "
+                   f"{settings.max_per_30min} per 30 min | Est. time: {summary['estimated_minutes']} min "
+                   f"({summary['estimated_hours']} hrs)")
 
 
 def run_plan_command(settings: Settings, calendar: Optional[Calendar] = None,
@@ -543,12 +584,23 @@ def run_plan_command(settings: Settings, calendar: Optional[Calendar] = None,
         return summary
 
 
-def _fetch_and_store_chunk(settings: Settings, client: HttpClient, state: State, catalog: Catalog,
-                           item_id: str, und: str, ikey: str, opt_type: str, expiry: Optional[str],
-                           strike: Optional[float], interval: str, source: str,
-                           frm: dt.date, to: dt.date, days_in_chunk: list, run_id: str, log):
+def _chunk_task(row: dict, frm: dt.date, to: dt.date, cdays: list) -> dict:
+    return {"item_id": row["item_id"], "und": row["underlying"], "ikey": row["instrument_key"],
+            "opt_type": row["option_type"], "expiry": row["expiry"], "strike": row["strike"],
+            "interval": row["interval"], "source": row["source"], "frm": frm, "to": to, "days": list(cdays),
+            "label": f"{row['item_id']} {row['underlying']}"}
+
+
+def _fetch_chunk(settings: Settings, client: HttpClient, task: dict, run_id: str, log) -> list:
+    """Network call + atomic raw-file write for one chunk. Touches no SQLite, so it is safe in a worker
+    thread. Returns result dicts for _record_result (several when a 400 / UDAPI100500 range was split)."""
+    item_id, ikey, interval, source = task["item_id"], task["ikey"], task["interval"], task["source"]
     table = ITEM_TABLE.get(item_id, "other")
-    ck = cov_key(ikey, interval)
+    out = []
+
+    def _fail(f_d, t_d, status, error):
+        out.append({"task": task, "from": f_d, "to": t_d, "days": [], "status": status, "error": error,
+                    "raw": None, "first_day": None})
 
     def _do_one(f_d: dt.date, t_d: dt.date, sub_days: list, allow_split: bool = True):
         if _stop_time_reached(settings.stop_at):
@@ -566,26 +618,26 @@ def _fetch_and_store_chunk(settings: Settings, client: HttpClient, state: State,
                 for single_d in sub_days:
                     _do_one(single_d, single_d, [single_d], allow_split=False)
                 return
-            st_flag = FAILED_RETRYABLE if err.code == "UDAPI100500" else FAILED_PERMANENT
-            state.set_chunk(item_id, ikey, f_d, t_d, st_flag, error=f"{err.status}:{err.code}",
-                            run_id=run_id, table_name=table, underlying=und)
+            _fail(f_d, t_d, FAILED_RETRYABLE if err.code == "UDAPI100500" else FAILED_PERMANENT,
+                  f"{err.status}:{err.code}")
             return
         except RetryExhausted as err:
-            state.set_chunk(item_id, ikey, f_d, t_d, FAILED_RETRYABLE, error=str(err),
-                            run_id=run_id, table_name=table, underlying=und)
+            _fail(f_d, t_d, FAILED_RETRYABLE, str(err))
             return
 
-        rows, _ = parse_candles(res.json)
-        if rows:
-            catalog.note_first_seen(ikey, rows[0]["ts_open"].date(), requested_from=f_d)
+        data = res.json.get("data")
+        candles = (data.get("candles") or []) if isinstance(data, dict) else []
+        # same validity rule as store.parse_candles, without building every row here
+        stamps = [c[0] for c in candles if isinstance(c, (list, tuple)) and len(c) >= 5
+                  and isinstance(c[0], str) and None not in c[1:5]]
         meta = {
             "item_id": item_id,
             "table": table,
             "instrument_key": ikey,
-            "underlying": und,
-            "expiry_date": expiry,
-            "strike": strike,
-            "option_type": opt_type,
+            "underlying": task["und"],
+            "expiry_date": task["expiry"],
+            "strike": task["strike"],
+            "option_type": task["opt_type"],
             "interval": interval,
             "source": source,
             "from_date": iso(f_d),
@@ -596,12 +648,92 @@ def _fetch_and_store_chunk(settings: Settings, client: HttpClient, state: State,
             "header_hints": res.header_hints,
         }
         w_info = write_raw(settings.raw_dir, item_id, ikey, f_d, t_d, run_id, res.body, meta)
-        status = DONE if rows else EMPTY_OK
-        state.set_chunk(item_id, ikey, f_d, t_d, status, raw_path=w_info["path"],
-                        sha256=w_info["sha256"], run_id=run_id, table_name=table, underlying=und)
-        state.mark_coverage(ck, sub_days, item_id, status, w_info["path"])
+        out.append({"task": task, "from": f_d, "to": t_d, "days": list(sub_days),
+                    "status": DONE if stamps else EMPTY_OK, "error": None, "raw": w_info,
+                    "first_day": to_date(min(stamps)) if stamps else None})
 
-    _do_one(frm, to, days_in_chunk, allow_split=True)
+    _do_one(task["frm"], task["to"], task["days"], allow_split=True)
+    return out
+
+
+def _record_result(state: State, catalog: Catalog, res: dict, run_id: str) -> None:
+    """SQLite side of one chunk result (main thread only). A chunk is DONE only after its raw file exists."""
+    t = res["task"]
+    table = ITEM_TABLE.get(t["item_id"], "other")
+    if res["raw"] is None:
+        state.set_chunk(t["item_id"], t["ikey"], res["from"], res["to"], res["status"], error=res["error"],
+                        run_id=run_id, table_name=table, underlying=t["und"])
+        return
+    if res["first_day"] is not None:
+        catalog.note_first_seen(t["ikey"], res["first_day"], requested_from=res["from"])
+    state.set_chunk(t["item_id"], t["ikey"], res["from"], res["to"], res["status"], raw_path=res["raw"]["path"],
+                    sha256=res["raw"]["sha256"], run_id=run_id, table_name=table, underlying=t["und"])
+    state.mark_coverage(cov_key(t["ikey"], t["interval"]), res["days"], t["item_id"], res["status"],
+                        res["raw"]["path"])
+
+
+def _execute_tasks(settings: Settings, client: HttpClient, state: State, catalog: Catalog, tasks: list,
+                   run_id: str, log) -> None:
+    """Run chunk tasks: sequentially (workers = 1, the old behaviour) or on a small thread pool.
+    Worker threads only do network + raw files; every SQLite write happens here, in the calling thread."""
+    prog = getattr(settings, "progress", None)
+    workers = max(1, int(getattr(settings, "workers", 1) or 1))
+    if prog is not None:
+        prog.add_total(len(tasks))
+    if workers == 1 or len(tasks) < 2:
+        for t in tasks:
+            for res in _fetch_chunk(settings, client, t, run_id, log):
+                _record_result(state, catalog, res, run_id)
+            if prog is not None:
+                prog.advance(t["label"])
+        return
+
+    stop = threading.Event()
+
+    def _job(t):
+        return None if stop.is_set() else _fetch_chunk(settings, client, t, run_id, log)
+
+    pool = ThreadPoolExecutor(max_workers=workers, thread_name_prefix="updl")
+    futs = {pool.submit(_job, t): t for t in tasks}
+    state.autocommit = False        # one commit about once a second instead of two fsyncs per chunk
+    try:
+        pending = set(futs)
+        while pending:
+            done, pending = wait(pending, timeout=1.0, return_when=FIRST_COMPLETED)
+            for f in done:
+                for res in f.result() or []:        # re-raises TokenExpired / BudgetExceeded from a worker
+                    _record_result(state, catalog, res, run_id)
+                if prog is not None:
+                    prog.advance(futs[f]["label"])
+            state.flush()
+    except BaseException:
+        stop.set()
+        for f in futs:
+            f.cancel()
+        raise
+    finally:
+        pool.shutdown(wait=True)    # calls already on the wire finish; unrecorded chunks are fetched again later
+        state.flush()
+        state.autocommit = True
+
+
+def _fetch_and_store_chunk(settings: Settings, client: HttpClient, state: State, catalog: Catalog,
+                           item_id: str, und: str, ikey: str, opt_type: str, expiry: Optional[str],
+                           strike: Optional[float], interval: str, source: str,
+                           frm: dt.date, to: dt.date, days_in_chunk: list, run_id: str, log):
+    """Kept for backward compatibility: fetch one chunk and record it (sequential)."""
+    row = {"item_id": item_id, "underlying": und, "instrument_key": ikey, "option_type": opt_type,
+           "expiry": expiry, "strike": strike, "interval": interval, "source": source}
+    for res in _fetch_chunk(settings, client, _chunk_task(row, frm, to, days_in_chunk), run_id, log):
+        _record_result(state, catalog, res, run_id)
+
+
+def _master_is_stale(path: Path) -> bool:
+    """The instrument master is a daily snapshot: one from an earlier IST day misses newly listed contracts."""
+    try:
+        return dt.datetime.fromtimestamp(path.stat().st_mtime, tz=IST).date() < today_ist()
+    except OSError:
+        return True
 
 
 def run_download(settings: Settings, client: HttpClient, calendar: Optional[Calendar] = None,
@@ -666,7 +798,7 @@ def run_download(settings: Settings, client: HttpClient, calendar: Optional[Cale
         if settings.item_selected("D12"):
             for exch, url in MASTER_URLS.items():
                 p = settings.raw_dir / "D12" / f"{exch}.json.gz"
-                if not p.exists():
+                if not p.exists() or _master_is_stale(p):
                     raw = client.download_file(url)
                     p.parent.mkdir(parents=True, exist_ok=True)
                     atomic_write_bytes(p, raw, overwrite=True)
@@ -678,14 +810,9 @@ def run_download(settings: Settings, client: HttpClient, calendar: Optional[Cale
         if early_filter:
             settings.items_filter = early_filter
             early_plan = build_selection_plan(settings, calendar, probe_data, include_warmup)
-            for row in early_plan["rows"]:
-                for frm, to, cdays in row["chunk_list"]:
-                    _fetch_and_store_chunk(
-                        settings, client, state, catalog,
-                        row["item_id"], row["underlying"], row["instrument_key"],
-                        row["option_type"], row["expiry"], row["strike"],
-                        row["interval"], row["source"], frm, to, cdays, run_id, log
-                    )
+            _execute_tasks(settings, client, state, catalog,
+                           [_chunk_task(row, frm, to, cdays) for row in early_plan["rows"]
+                            for frm, to, cdays in row["chunk_list"]], run_id, log)
         settings.items_filter = saved_filter
 
         if settings.item_selected("D07") and plan_name in ("A", "A_PARTIAL"):
@@ -707,7 +834,8 @@ def run_download(settings: Settings, client: HttpClient, calendar: Optional[Cale
                     catalog.add_expiries(und, exp_dates, "expired")
                 except (PlusRequired, ApiError, RetryExhausted):
                     exp_dates = []
-                w0, w1 = _window_bounds(settings, calendar, ["warmup_option", "test"], und, include_warmup, oldest_opt)
+                w0, w1 = _window_bounds(settings, calendar, ["warmup_option", "test"], und,
+                                        settings.warmup_for("D06", include_warmup), oldest_opt)
                 rel_exps = [e for e in exp_dates if w0 <= e <= w1 + dt.timedelta(days=35)]
                 # v3: index futures are monthly, so the future/contract list is only asked for the last expiry
                 # of each month (saves about one call per weekly expiry for NIFTY and SENSEX).
@@ -717,6 +845,9 @@ def run_download(settings: Settings, client: HttpClient, calendar: Optional[Cale
                                          ("/v2/expired-instruments/future/contract", "FUT")):
                         if kind_tag == "FUT" and exp_d not in fut_exps:
                             continue
+                        mark = f"d07:{und}:{kind_tag}:{iso(exp_d)}"
+                        if catalog.get_kv(mark) == "1":
+                            continue        # v4: an expired expiry's contract list never changes; ask once
                         try:
                             rc = client.get(ep, {"instrument_key": sk, "expiry_date": iso(exp_d)}, kind="expired")
                             raw_c = rc.json.get("data") or []
@@ -737,6 +868,7 @@ def run_download(settings: Settings, client: HttpClient, calendar: Optional[Cale
                                 })
                             if parsed_c:
                                 catalog.add_contracts(und, parsed_c, "expired")
+                            catalog.set_kv(mark, "1")
                         except (PlusRequired, ApiError, RetryExhausted):
                             continue
         else:
@@ -756,16 +888,10 @@ def run_download(settings: Settings, client: HttpClient, calendar: Optional[Cale
                                          settings.workdir / "selection_plan.parquet")
         print_plan_summary(full_plan, settings)
 
-        for row in full_plan["rows"]:
-            if row["item_id"] in ("D01", "D02", "D03", "D04", "D09"):
-                continue
-            for frm, to, cdays in row["chunk_list"]:
-                _fetch_and_store_chunk(
-                    settings, client, state, catalog,
-                    row["item_id"], row["underlying"], row["instrument_key"],
-                    row["option_type"], row["expiry"], row["strike"],
-                    row["interval"], row["source"], frm, to, cdays, run_id, log
-                )
+        _execute_tasks(settings, client, state, catalog,
+                       [_chunk_task(row, frm, to, cdays) for row in full_plan["rows"]
+                        if row["item_id"] not in ("D01", "D02", "D03", "D04", "D09")
+                        for frm, to, cdays in row["chunk_list"]], run_id, log)
 
         if not state.retryable():
             catalog.set_kv("completed_once", "1")
@@ -773,6 +899,8 @@ def run_download(settings: Settings, client: HttpClient, calendar: Optional[Cale
         return {
             "plan": plan_name,
             "calls_made": client.calls_made,
+            "retries": client.retries,
+            "count_429": client.count_429,
             "chunk_counts": state.chunk_counts(),
         }
     except TokenExpired:

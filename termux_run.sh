@@ -1,8 +1,11 @@
 #!/usr/bin/env bash
-# Termux non-interactive wrapper for updl (1-Month Rolling Backwards Continue Mode)
+# Termux non-interactive wrapper for updl (one WEEK per `continue`, newest first, then one week further back)
+#   bash termux_run.sh update     git pull + setup (run this after every code update)
 #   bash termux_run.sh setup      packages + .venv (run once, and again after `pkg upgrade`)
 #   bash termux_run.sh probe      Stage-0 probe (max 40 API calls)
-#   bash termux_run.sh continue   next 1-month batch (resumes an interrupted batch first)
+#   bash termux_run.sh continue   next 1-week batch: download, validate, derive, export, copy to
+#                                 Download/BOYU_Data/week_NN_.../ (resumes an interrupted batch first)
+#                                 options: --weeks 4 (several batches), --workers 4, --rate 240
 #   bash termux_run.sh record     live option-chain Recorder (market time only)
 #   bash termux_run.sh export     phone CSV zip of the downloaded window
 #   bash termux_run.sh <command>  any other `python -m updl` command
@@ -64,6 +67,11 @@ ACTION="${1:-continue}"
 shift || true
 
 case "$ACTION" in
+    update)
+        say "[Update] GitHub se naya code la raha hoon..."
+        git pull --ff-only || { say "[Update] git pull fail hua. Internet check karo, ya: git fetch origin && git reset --hard origin/main"; exit 1; }
+        exec bash "$SCRIPT_DIR/termux_run.sh" setup
+        ;;
     setup)
         if [ "$IS_TERMUX" -eq 1 ]; then
             # Termux: numpy/pandas/scipy/pyarrow ko pip se compile mat karo (numpy build fail hota hai).

@@ -1,4 +1,4 @@
-# README_OWNER_HINGLISH.md (Owner Guide + Termux 1-Mahina Continue Mode) — v3
+# README_OWNER_HINGLISH.md (Owner Guide + Termux 1-Hafta Continue Mode) — v4
 
 Yeh guide simple Hinglish mein hai. Lines chhoti rakhi hain taaki aap apne Android phone (Termux) aur PC dono par aaraam se padh sako.
 
@@ -111,18 +111,28 @@ python -m updl download --dry-run --plan A
 Yeh bina internet call ke exact calls aur samay batata hai.
 
 ## 5. Asli Run aur Termux 1-Mahina `continue` Mode
-### A) Termux: ek-ek mahina peeche (`continue`)
-Phone par 6 mahine ek saath mat utaro.
+### A) Termux: ek-ek HAFTA (`continue`) — v4
+Bas ek command:
 ```bash
 bash termux_run.sh continue
 ```
-(ya `python -m updl continue`)
-* Pehli baar: aaj ki tarikh se pichhla 1 mahina. Example: aaj 12 Nov 2026 -> `2026-10-12` se `2026-11-11` (last poora trading din).
-* Dobara chalao: uske pehle ka mahina (`2026-09-12` se `2026-10-09`), phir uske pehle ka, aise hi.
-* Har mahine ki zip: `updl_data/phone_outputs/` aur phone ke `Download/updl_months/` mein.
-* Zip ke andar: `store/` (Parquet), `chain_csv/` (phone par khulne wali CSV, section 14), `health.csv`, `health_summary.txt`, `month_summary.txt`.
-* Probe report 7 din se purani ho to `continue` khud probe dobara chala leta hai (max 40 calls).
-* Beech mein ruk jaye (Android ne band kiya, token expire hua): wahi command dobara chalao. Kaam wahin se aage badhega.
+* **Pehli baar**: aaj se pichhle 7 din (example: aaj 14 Nov -> `2026-11-07` se `2026-11-13`).
+* **Dobara chalao**: ek hafta aur peeche (`10-31` se `11-06`), phir `10-24` se `10-30`, aise hi. Beech mein koi din nahi chhootta.
+* Agar naye din aa gaye hain (aap kal ke baad chala rahe ho) to pehle woh naye din aate hain, phir peeche wala hafta.
+* **Naya din turant nahi milta**: Upstox raat ko pichhle din ka data kuch ghante baad deta hai. Tab line aayegi "13 Nov ka data Upstox par abhi nahi aaya". Woh din agli baar apne aap aa jayega. Kuch nahi karna.
+* **Chalte waqt ek line har second badalti hai**: `[1/5 Download] [#####----] 57% 430/754 calls | D06 NIFTY | 231/min | ETA 02:20 | RUNNING`.
+  * `WAITING-RATE-CAP (resume in 03:12)` = Upstox ki 30-minute limit poori ho gayi, program khud ruk kar aage chalega. Band mat karo.
+  * `RETRY-429 (8s)` = Upstox ne dheere chalne ko kaha, program khud dheere ho gaya.
+* **Output phone ke Download folder mein**: `Download/BOYU_Data/week_01_2026-11-07_to_2026-11-13/` (har hafte ka naya folder):
+  * `chain_csv/` = phone par khulne wali CSV (option chain har 15 minute + summary)
+  * `store/` = Parquet (backtest ke liye)
+  * `health.csv`, `health_summary.txt`, `week_summary.txt`, `README_EXPORT.txt`
+  * `Download/BOYU_Data/INDEX.txt` = har hafte ki ek line
+* Kai hafte ek saath: `bash termux_run.sh continue --weeks 4`
+* Options ki history 3 Oct 2024 se milti hai (live check 14 Nov 2026). Program wahan tak peeche jaakar khud ruk jata hai.
+* Beech mein ruk jaye (Android ne band kiya, Ctrl+C, token): wahi command dobara. Kaam wahin se aage badhega, kuch dobara download nahi hoga.
+* Purana "mahina" wala cursor ho to program khud bata dega aur hafta mode shuru kar dega. Zabardasti naye sire se: `--reset-cursor`.
+* Purana mahina mode chahiye: `python -m updl continue --window-days 0`.
 
 ### B) Full window pipeline (PC)
 ```bash
@@ -135,12 +145,13 @@ python -m updl verify
 ```
 
 ## 6. Kitna Time aur Disk Space Lagega
-* Default speed: **30 calls per minute** (`RATE_CALLS_PER_MIN=30`, max 900 per 30 min).
-* Formula: `calls ÷ 30 = minutes`.
-* Upstox ka official rate page (12 Nov 2026): 50/second, 500/minute, 2000 per 30 minute. Program khud speed nahi badhata. Aap chaho to `--rate 60` de sakte ho (limit ke andar). 429 aaye to program khud aadha kar deta hai.
-* Ek mahina (`continue`, 3 index): lagbhag 7,700 calls = ~4.3 ghante at 30/min, ~2.2 ghante at 60/min (ESTIMATE; `continue --dry-run` exact batata hai).
-* Disk: ~0.2-0.3 GB per mahina, 6 mahine ~1.2-1.8 GB (ESTIMATE).
-* Daily OAuth token raat 3:30 par expire hota hai (exit code 20). Naya token daalo, wahi command dobara chalao.
+* Default speed (v4): **240 calls per minute**, 4 workers, max **1800 calls per 30 minute** (Upstox official: 500/min, 2000 per 30 min).
+* Ek hafta (3 index, band + wide chain) = lagbhag 750-800 calls. Cloud server par naapa: download ~3.5 minute + baaki ~1 minute (numbers `docs/CHANGELOG_v4.md` mein). Phone par zyada lagega (network aur CPU dheema) — NOT RUN on phone.
+* 30 minute mein 1800 calls ki limit hai, isliye lagataar 2 hafte ke baad program `WAITING-RATE-CAP` dikha kar rukta hai. Yeh normal hai.
+* 429 aaye to program khud speed aadhi karta hai aur dheere-dheere wapas badhata hai. Dheere chalana ho: `--rate 120`. Limit kam: `--max-per-30min 900`.
+* Poori options history (Oct 2024 se, ~110 hafte) = lagbhag 85,000 calls = kam se kam ~24 ghante ka download (30-minute limit ki wajah se), kai din mein thoda-thoda. (ESTIMATE)
+* Disk: ek hafta ~60-150 MB (store + zip + phone folder). (ESTIMATE; pehle asli hafte mein dekh lo)
+* Daily OAuth token raat 3:30 par expire hota hai (exit code 20). Analytics token 1 saal chalta hai aur Plus par expired data ke liye bhi chalta hai (aapke probe mein P16 PASS).
 
 ## 7. OK / NOT OK / PROVISIONAL ka Matlab
 * **OK**: Us din ke expected 1-minute bars (>=99%), timestamps aur OHLC sab sahi hain.
@@ -187,7 +198,7 @@ pkg update -y && pkg install -y git python
 ```bash
 git clone https://github.com/starmovie12/boyu
 ```
-   Dobara update ke liye: `cd ~/boyu && git pull`
+   Dobara update ke liye: `cd ~/boyu && bash termux_run.sh update`
 3. Folder mein jao:
 ```bash
 cd ~/boyu
@@ -210,7 +221,7 @@ termux-wake-lock
 ```bash
 bash termux_run.sh probe
 ```
-9. Ek mahina download:
+9. Ek hafta download (output: phone `Download/BOYU_Data/`):
 ```bash
 bash termux_run.sh continue
 ```

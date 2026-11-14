@@ -196,3 +196,66 @@ def snapshot_times(day: dt.date, open_hhmm: str, close_hhmm: str, every_min: int
         t += step
     out.append(end)
     return out
+
+
+# ---- matrix form (v4): the same as-of rules for every minute of a day at once (used by derive) --------------
+def oi_matrices(odf: pd.DataFrame, times: Iterable) -> dict:
+    """Open interest known at each time T for every contract of one underlying-day.
+    Returns {expiry: {"strikes": K, "ce": [T x K], "pe": [T x K], "ce_filled": bool, "pe_filled": bool}};
+    NaN = no candle of that contract has closed yet (or the contract is not in the data)."""
+    times = list(times)
+    out = {}
+    if odf is None or odf.empty or not times:
+        return out
+    t_ns = _to_ns(times)
+    df = odf[odf["option_type"].isin(SIDES) & odf["strike"].notna()]
+    if df.empty:
+        return out
+    df = df.assign(_tc=_to_ns(df["ts_close"])).sort_values(["instrument_key", "_tc"], kind="stable")
+    one_min = 60 * 10**9
+    for exp, ge in df.groupby("expiry_date", sort=True):
+        strikes = np.sort(ge["strike"].astype(float).unique())
+        pos = {k: i for i, k in enumerate(strikes)}
+        mats = {sd: np.full((len(t_ns), len(strikes)), np.nan) for sd in SIDES}
+        fill = {sd: np.zeros((len(t_ns), len(strikes)), dtype=bool) for sd in SIDES}
+        for _key, g in ge.groupby("instrument_key", sort=False):
+            side = str(g["option_type"].iloc[0])
+            col = pos[float(g["strike"].iloc[0])]
+            tc = g["_tc"].to_numpy()
+            oi = _nullable_float(g["oi"])
+            idx = np.searchsorted(tc, t_ns, side="right") - 1
+            has = idx >= 0
+            safe = np.where(has, idx, 0)
+            mats[side][:, col] = np.where(has, oi[safe], np.nan)
+            fill[side][:, col] = has & ((t_ns - tc[safe]) >= one_min)
+        out[exp] = {"strikes": strikes, "ce": mats["CE"], "pe": mats["PE"],
+                    "ce_filled": fill["CE"], "pe_filled": fill["PE"]}
+    return out
+
+
+def metrics_matrix(m: dict, spot) -> dict:
+    """chain_metrics() for every time row of one expiry (same rules, same tie-breaks), as arrays."""
+    k = m["strikes"]
+    ce, pe = m["ce"], m["pe"]
+    spot = np.asarray(spot, dtype=float)
+    kc, kp = ~np.isnan(ce), ~np.isnan(pe)
+    ce0, pe0 = np.where(kc, ce, 0.0), np.where(kp, pe, 0.0)
+    ce_sum, pe_sum = ce0.sum(axis=1), pe0.sum(axis=1)
+    with np.errstate(divide="ignore", invalid="ignore"):
+        pcr = np.where(kc.any(axis=1) & kp.any(axis=1) & (ce_sum > 0), pe_sum / ce_sum, np.nan)
+    no_spot = np.isnan(spot)[:, None]
+    with np.errstate(invalid="ignore"):
+        call_mask = kc & (no_spot | (k[None, :] >= spot[:, None]))
+        put_mask = kp & (no_spot | (k[None, :] <= spot[:, None]))
+
+    def wall(values, mask):
+        idx = np.argmax(np.where(mask, values, -np.inf), axis=1)
+        return np.where(mask.any(axis=1), k[idx], np.nan)
+
+    diff = k[None, :] - k[:, None]                       # [strike, candidate] = candidate - strike
+    pay = ce0 @ np.maximum(0.0, diff) + pe0 @ np.maximum(0.0, -diff)
+    pain = np.where((kc.sum(axis=1) >= 2) & (kp.sum(axis=1) >= 2), k[np.argmin(pay, axis=1)], np.nan)
+    return {"pcr": pcr, "call_oi_wall": wall(ce, call_mask), "put_oi_wall": wall(pe, put_mask),
+            "max_pain": pain, "n_strikes": np.full(len(spot), len(k)),
+            "n_oi_known": kc.sum(axis=1) + kp.sum(axis=1),
+            "n_oi_carried": m["ce_filled"].sum(axis=1) + m["pe_filled"].sum(axis=1)}

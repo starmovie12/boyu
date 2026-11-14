@@ -27,9 +27,13 @@ from .config import Settings, load_yaml
 from .errors import CorruptFile, FillingForbidden
 from .messages import CORRUPT
 from .sessions import Calendar, instrument_class, load_calendar
-from .state import FAILED_PERMANENT, FAILED_RETRYABLE, INCOMPLETE, State
-from .store import atomic_write_bytes, date_of_part, list_parts, read_parquet, verify_raw_integrity
+from .state import FAILED_PERMANENT, FAILED_RETRYABLE, INCOMPLETE, State, cov_key
+from .store import ITEM_TABLE, atomic_write_bytes, date_of_part, list_parts, read_parquet, verify_raw_integrity
 from .timeutil import at_ist, iso, to_date
+
+
+RAW_TABLES = tuple(sorted(set(ITEM_TABLE.values())))
+PARTIAL_DAY_MINUTES = 30      # option data ending this long before the session close = the day was cut short
 
 
 def forbid_fill(df: pd.DataFrame) -> pd.DataFrame:
@@ -37,14 +41,17 @@ def forbid_fill(df: pd.DataFrame) -> pd.DataFrame:
     raise FillingForbidden("Forward-filling or interpolating raw tables is forbidden by Rule 4.")
 
 
-def check_no_filled_rows(store_dir: Path) -> list:
-    """Scan every raw/normalised table in store_dir and return any file where is_filled is True."""
+def check_no_filled_rows(store_dir: Path, window: Optional[tuple] = None) -> list:
+    """Scan the raw/normalised tables in store_dir and return any file where is_filled is True.
+    window=(first, last) limits the scan to those days (week mode)."""
     violations = []
     for part in ("dev", "holdout"):
-        for p in list_parts(store_dir, part):
-            df = read_parquet(p)
-            if "is_filled" in df.columns and bool(df["is_filled"].any()):
-                violations.append(str(p))
+        for table in RAW_TABLES:
+            for p in list_parts(store_dir, part, table):
+                if window and not (to_date(window[0]) <= date_of_part(p) <= to_date(window[1])):
+                    continue
+                if bool(read_parquet(p, columns=["is_filled"])["is_filled"].any()):
+                    violations.append(str(p))
     return violations
 
 
@@ -249,24 +256,39 @@ def reconcile_bhavcopy(settings: Settings, calendar: Calendar) -> dict:
     }
 
 
-def run_validate(settings: Settings, calendar: Optional[Calendar] = None, log=None) -> dict:
+def run_validate(settings: Settings, calendar: Optional[Calendar] = None, log=None,
+                 window: Optional[tuple] = None, since_utc: Optional[str] = None, tick=None) -> dict:
+    """window=(first, last): validate only those days and merge them into the existing health.csv (week mode);
+    since_utc then limits the raw-file hash check to the chunks of this batch."""
     log = log or (lambda *a, **k: None)
     settings.ensure_dirs()
     calendar = calendar or load_calendar(settings.reference_dir)
 
     state = State(settings.state_dir)
     try:
-        bad_raw = verify_raw_integrity(state)
+        bad_raw = verify_raw_integrity(state, since_utc)
         if bad_raw:
             print(CORRUPT)
             for bp in bad_raw:
                 print(bp)
             raise CorruptFile(f"Corrupted raw file: {bad_raw[0]}")
         inc_chunks = state.chunks(status=[INCOMPLETE, FAILED_RETRYABLE, FAILED_PERMANENT])
+        # v4: a failed chunk whose days were fetched later under another chunk range is no longer a gap
+        # (the old failure row stays in the table for ever and used to mark the day NOT OK for ever)
+        covered_cache = {}
+        still_missing = []
+        for c in inc_chunks:
+            ck = cov_key(c["instrument_key"], "1d" if str(c.get("table_name") or "").endswith("_1d") else "1m")
+            if ck not in covered_cache:
+                covered_cache[ck] = state.covered_dates(ck)
+            days = [x for x in calendar.trading_days(c["from_date"], c["to_date"]) if x not in covered_cache[ck]]
+            if days:
+                still_missing.append({**c, "_days": days})
+        inc_chunks = still_missing
     finally:
         state.close()
 
-    filled_hits = check_no_filled_rows(settings.store_dir)
+    filled_hits = check_no_filled_rows(settings.store_dir, window)
     if filled_hits:
         raise FillingForbidden(f"is_filled=True found in {filled_hits[0]}")
 
@@ -275,17 +297,15 @@ def run_validate(settings: Settings, calendar: Optional[Calendar] = None, log=No
 
     incomplete_by_und_day = defaultdict(set)
     for c in inc_chunks:
-        f_d = to_date(c["from_date"])
-        t_d = to_date(c["to_date"])
-        cur = f_d
-        while cur <= t_d:
+        for cur in c["_days"]:
             incomplete_by_und_day[(c["underlying"], cur)].add(c["item_id"])
-            cur += dt.timedelta(days=1)
 
     all_parts = list_parts(settings.store_dir, "dev") + list_parts(settings.store_dir, "holdout")
     dates_in_store = sorted({date_of_part(p) for p in all_parts})
     if not dates_in_store:
         dates_in_store = calendar.trading_days(settings.test_start, settings.test_end)
+    if window:
+        dates_in_store = [x for x in dates_in_store if to_date(window[0]) <= x <= to_date(window[1])]
 
     health_rows = []
     health_lines = []
@@ -294,6 +314,8 @@ def run_validate(settings: Settings, calendar: Optional[Calendar] = None, log=No
     valid_days_set = set()
 
     for d in dates_in_store:
+        if tick:
+            tick(iso(d))
         st_type = calendar.session_type(d)
         if st_type == "MUHURAT":
             for und in settings.instrument_names():
@@ -318,8 +340,9 @@ def run_validate(settings: Settings, calendar: Optional[Calendar] = None, log=No
                 else:
                     continue
 
-            if calendar.holiday_list_status(d) == "HOLIDAY_LIST_2025_UNVERIFIED":
-                reasons.append("HOLIDAY_LIST_2025_UNVERIFIED")
+            if calendar.holiday_list_status(d) != "HOLIDAY_LIST_OK" and not calendar.has_overlay(d):
+                # v4: no API fact and no table row for this day: its session is unknown, never guessed
+                reasons.append("TABLE_GAP")
 
             if (und, d) in incomplete_by_und_day:
                 reasons.append("INCOMPLETE_CHUNK")
@@ -362,13 +385,20 @@ def run_validate(settings: Settings, calendar: Optional[Calendar] = None, log=No
                 odf = read_parquet(opt_p)
                 o_res = validate_dataframe_rows(odf, fo_klass, d, calendar, is_index=False)
                 reasons.extend(o_res["reasons"])
+                close_txt = calendar.close_time_text(fo_klass, d)
+                if o_res["last_bar_hhmm"] and close_txt and st_type == "NORMAL":
+                    gap_min = (at_ist(d, close_txt) - at_ist(d, o_res["last_bar_hhmm"])).total_seconds() / 60.0
+                    if gap_min > PARTIAL_DAY_MINUTES:
+                        # v4: Upstox loads the newest session in stages after midnight; catch a cut-off day
+                        reasons.append(f"OPT_PARTIAL_DAY(last {o_res['last_bar_hhmm']})")
                 if o_res["last_bar_hhmm"]:
                     yr_wk = f"{d.isocalendar()[0]}-W{d.isocalendar()[1]:02d}"
                     modal_last_bar[(fo_klass, yr_wk)][o_res["last_bar_hhmm"]] += 1
 
             hard_fail_tokens = ("LOW_BAR_COUNT", "GAP_", "OUTSIDE_SESSION", "OHLC_VIOLATION",
                                 "NON_POSITIVE_PRICE", "NULL_VOLUME", "NEGATIVE_VOLUME", "NEGATIVE_OI",
-                                "INCOMPLETE_CHUNK", "NON_WHOLE_MINUTE", "BAD_TZ_OFFSET", "MISSING_SPOT")
+                                "INCOMPLETE_CHUNK", "NON_WHOLE_MINUTE", "BAD_TZ_OFFSET", "MISSING_SPOT",
+                                "TABLE_GAP", "OPT_PARTIAL_DAY")
             is_not_ok = any(any(r.startswith(tok) for tok in hard_fail_tokens) for r in reasons)
 
             if is_not_ok:
@@ -396,7 +426,20 @@ def run_validate(settings: Settings, calendar: Optional[Calendar] = None, log=No
             })
             health_lines.append(f"{iso(d)}  {und}  {st_label}  {reason_str}")
 
-    pd.DataFrame(health_rows).to_csv(settings.reports_dir / "health.csv", index=False)
+    health_csv = settings.reports_dir / "health.csv"
+    new_df = pd.DataFrame(health_rows)
+    if window and health_csv.exists():
+        try:        # week mode: keep the lines of the other days, replace the lines of this window
+            old_df = pd.read_csv(health_csv, dtype=str)
+            lo, hi = iso(window[0]), iso(window[1])
+            old_df = old_df[(old_df["trading_date"] < lo) | (old_df["trading_date"] > hi)]
+            new_df = pd.concat([old_df, new_df.astype(str)], ignore_index=True) if len(new_df) else old_df
+            new_df = new_df.sort_values(["trading_date", "underlying"], kind="stable")
+            ok_rows = new_df[new_df["status"].isin(["OK", "PROVISIONAL"])]
+            valid_days_set = {to_date(x) for x in ok_rows["trading_date"]}
+        except (OSError, ValueError, KeyError):
+            pass
+    new_df.to_csv(health_csv, index=False)
 
     rec_res = reconcile_bhavcopy(settings, calendar)
     valid_sorted = sorted(valid_days_set)

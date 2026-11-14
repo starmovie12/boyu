@@ -26,6 +26,7 @@ class State:
         self.dir = Path(state_dir)
         self.dir.mkdir(parents=True, exist_ok=True)
         self.db = sqlite3.connect(self.dir / "progress.sqlite3", timeout=30)
+        self.autocommit = True
         self.db.execute("PRAGMA synchronous=FULL")
         self.db.executescript("""
         CREATE TABLE IF NOT EXISTS chunk_status(
@@ -40,7 +41,17 @@ class State:
         self.db.commit()
 
     def close(self):
+        self.db.commit()
         self.db.close()
+
+    def _commit(self):
+        """Commit now, unless a bulk writer switched autocommit off (it then calls flush() about once a second:
+        a kill can lose only that last second of chunk records, and those chunks are simply fetched again)."""
+        if self.autocommit:
+            self.db.commit()
+
+    def flush(self):
+        self.db.commit()
 
     # ---- chunks --------------------------------------------------------------
     def set_chunk(self, item_id, key, frm, to, status, error=None, raw_path=None, sha256=None, run_id=None,
@@ -57,7 +68,7 @@ class State:
               underlying=COALESCE(excluded.underlying, underlying)
         """, (item_id, key, str(to_date(frm)), str(to_date(to)), status, error, utc_iso(), raw_path, sha256,
               run_id, table_name, underlying))
-        self.db.commit()
+        self._commit()
 
     def chunk_counts(self) -> dict:
         return dict(self.db.execute("SELECT status, COUNT(*) FROM chunk_status GROUP BY status").fetchall())
@@ -66,7 +77,7 @@ class State:
         row = self.db.execute("SELECT COALESCE(SUM(attempts), 0) FROM chunk_status").fetchone()
         return int(row[0])
 
-    def chunks(self, status=None, item_id=None) -> list:
+    def chunks(self, status=None, item_id=None, since_utc=None) -> list:
         q, args = "SELECT item_id, instrument_key, from_date, to_date, status, raw_path, sha256, fetch_run_id, " \
                   "table_name, underlying, fetched_utc, error FROM chunk_status WHERE 1=1", []
         if status:
@@ -76,6 +87,9 @@ class State:
         if item_id:
             q += " AND item_id=?"
             args.append(item_id)
+        if since_utc:                       # only chunks fetched at or after this UTC stamp (week mode)
+            q += " AND fetched_utc>=?"
+            args.append(since_utc)
         cols = ["item_id", "instrument_key", "from_date", "to_date", "status", "raw_path", "sha256", "fetch_run_id",
                 "table_name", "underlying", "fetched_utc", "error"]
         rows = [dict(zip(cols, r)) for r in self.db.execute(q, args)]
@@ -94,7 +108,7 @@ class State:
         self.db.executemany(
             "INSERT OR REPLACE INTO coverage(instrument_key, trading_date, item_id, status, fetched_utc, raw_path) "
             "VALUES(?,?,?,?,?,?)", [(key, str(to_date(d)), item_id, status, now, raw_path) for d in dates])
-        self.db.commit()
+        self._commit()
 
     def covered_dates(self, key) -> set:
         rows = self.db.execute("SELECT trading_date FROM coverage WHERE instrument_key=?", (key,)).fetchall()

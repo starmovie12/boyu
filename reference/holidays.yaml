@@ -1,23 +1,26 @@
-# holidays.yaml (table_version 2) -- full-day closures. tag SOURCE_SECONDARY (NSE/CMTR/71775 and /72260).
+# holidays.yaml (table_version 3) -- full-day closures of NSE/NFO/BSE/BFO.
+# v4: tag SOURCE. The 16 dates equal the TRADING_HOLIDAY rows of Upstox GET /v2/market/holidays read live on
+# 14 Nov 2026 (which also lists settlement-only holidays 19 Feb, 19 Mar, 1 Apr, 26 Aug: markets OPEN those days).
+# Other years: week mode reads /v2/market/timings/{date} per day (state/calendar_cache.json), not this table.
 # Before 2026-01-01 a weekday with a daily candle is a trading day (validator marks HOLIDAY_LIST_2025_UNVERIFIED).
 # After 2026-12-31 this table has no data: code uses weekdays and warns.
-table_version: 2
+table_version: 3
 covers_from: "2026-01-01"
 covers_to: "2026-12-31"
 holidays:
-  - {date: "2026-01-15", tag: SOURCE_SECONDARY}
-  - {date: "2026-01-26", tag: SOURCE_SECONDARY}
-  - {date: "2026-03-03", tag: SOURCE_SECONDARY}
-  - {date: "2026-03-26", tag: SOURCE_SECONDARY}
-  - {date: "2026-03-31", tag: SOURCE_SECONDARY}
-  - {date: "2026-04-03", tag: SOURCE_SECONDARY}
-  - {date: "2026-04-14", tag: SOURCE_SECONDARY}
-  - {date: "2026-05-01", tag: SOURCE_SECONDARY}
-  - {date: "2026-05-28", tag: SOURCE_SECONDARY}
-  - {date: "2026-06-26", tag: SOURCE_SECONDARY}
-  - {date: "2026-09-14", tag: SOURCE_SECONDARY}
-  - {date: "2026-10-02", tag: SOURCE_SECONDARY}
-  - {date: "2026-10-20", tag: SOURCE_SECONDARY}
-  - {date: "2026-11-10", tag: SOURCE_SECONDARY, note: "after TEST_END 2026-11-09"}
-  - {date: "2026-11-24", tag: SOURCE_SECONDARY}
-  - {date: "2026-12-25", tag: SOURCE_SECONDARY}
+  - {date: "2026-01-15", tag: SOURCE}
+  - {date: "2026-01-26", tag: SOURCE}
+  - {date: "2026-03-03", tag: SOURCE}
+  - {date: "2026-03-26", tag: SOURCE}
+  - {date: "2026-03-31", tag: SOURCE}
+  - {date: "2026-04-03", tag: SOURCE}
+  - {date: "2026-04-14", tag: SOURCE}
+  - {date: "2026-05-01", tag: SOURCE}
+  - {date: "2026-05-28", tag: SOURCE}
+  - {date: "2026-06-26", tag: SOURCE}
+  - {date: "2026-09-14", tag: SOURCE}
+  - {date: "2026-10-02", tag: SOURCE}
+  - {date: "2026-10-20", tag: SOURCE}
+  - {date: "2026-11-10", tag: SOURCE, note: "after TEST_END 2026-11-09"}
+  - {date: "2026-11-24", tag: SOURCE}
+  - {date: "2026-12-25", tag: SOURCE}

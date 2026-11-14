@@ -19,6 +19,7 @@ from .master import (equity_key, find_global, listed_contracts, parse_master_byt
 from .messages import (DATA_RIGHTS_WARNING, PLAN_A_PARTIAL, PLAN_B, PLAN_C, PROBE_MISSING,
                        PROBE_TOKEN_BLOCKED, RIGHTS_NOT_ALLOWED)
 from .secretscan import scan_file
+from .selector import monthly_expiries
 from .sessions import Calendar, load_calendar
 from .store import atomic_write_bytes, parse_candles
 from .timeutil import has_ist_offset, iso, today_ist, to_date, utc_iso
@@ -164,18 +165,20 @@ def run_probe(settings: Settings, client: HttpClient, calendar: Optional[Calenda
 
     # ---- P02: V3 1-minute Nifty spot, recent day ---------------------------
     p02_rows = []
+    pending_days = []
     try:
         res = client.get(v3_candle_path(nifty_key, "minutes", 1, iso(recent_day), iso(recent_day)), kind="v3")
         p02_rows, _ = parse_candles(res.json)
-        if not p02_rows and calendar.covers_to and recent_day > calendar.covers_to:
-            for back in range(1, 7):
-                cand_d = recent_day - dt.timedelta(days=back)
-                if cand_d.weekday() < 5:
-                    res = client.get(v3_candle_path(nifty_key, "minutes", 1, iso(cand_d), iso(cand_d)), kind="v3")
-                    p02_rows, _ = parse_candles(res.json)
-                    if p02_rows:
-                        recent_day = cand_d
-                        break
+        # v4: the newest session reaches the historical API only some hours after the close (seen live:
+        # 13 Nov still empty at 01:25 on 14 Nov). Step back to the newest day that is really served, so
+        # P02/P03/P07/P08 test the API and not the clock.
+        for _back in range(3):
+            if p02_rows:
+                break
+            pending_days.append(iso(recent_day))
+            recent_day = calendar.prev_trading_day(recent_day)
+            res = client.get(v3_candle_path(nifty_key, "minutes", 1, iso(recent_day), iso(recent_day)), kind="v3")
+            p02_rows, _ = parse_candles(res.json)
         if p02_rows:
             first_ts = p02_rows[0]["ts"]
             last_ts = p02_rows[-1]["ts"]
@@ -293,7 +296,7 @@ def run_probe(settings: Settings, client: HttpClient, calendar: Optional[Calenda
     except TokenNotPermitted as err:
         plus_required = True
         rec("P09", "FAIL", err.status, reason="TOKEN_TYPE_NOT_PERMITTED", code=err.code, token_used=expired_token_used)
-    except TokenExpired as err:
+    except TokenExpired:
         # v3: 401 here used to crash the probe with no report. Historical-candle V3 calls are served from a
         # cache without validating the token (Upstox staff, 2026-10-08), so P09 is the first real token check.
         if expired_token_used == "analytics":
@@ -386,12 +389,15 @@ def run_probe(settings: Settings, client: HttpClient, calendar: Optional[Calenda
                 rec(pid, "FAIL", 0, reason="NO_CONTRACT_FROM_P10")
 
         try:
+            # v4: index futures only exist on monthly expiries; the old code asked for the weekly expiry
+            # nearest to the target, got an empty list and reported FAIL (HTTP 200)
+            fut_exp = _nearest_date(monthly_expiries(nifty_expiries), recent_day - dt.timedelta(days=140))
             res_f = client.get("/v2/expired-instruments/future/contract",
-                               {"instrument_key": nifty_key, "expiry_date": iso(target_exp)}, kind="expired")
+                               {"instrument_key": nifty_key, "expiry_date": iso(fut_exp)}, kind="expired")
             f_list = res_f.json.get("data") or []
             if f_list:
                 fk = f_list[0].get("instrument_key") or f_list[0].get("expired_instrument_key")
-                last_td = target_exp if calendar.is_trading_day(target_exp) else calendar.prev_trading_day(target_exp)
+                last_td = fut_exp if calendar.is_trading_day(fut_exp) else calendar.prev_trading_day(fut_exp)
                 res_fc = client.get(expired_candle_path(fk, "1minute", iso(last_td), iso(last_td)), kind="expired")
                 f_rows, _ = parse_candles(res_fc.json)
                 rec("P14", "PASS" if f_rows else "FAIL", res_fc.status,
@@ -491,7 +497,9 @@ def run_probe(settings: Settings, client: HttpClient, calendar: Optional[Calenda
         d_warm = calendar.shift(settings.test_start, -int(max_warm))
         d_test = settings.test_start
         d_deep = recent_day - dt.timedelta(days=400)
-        probes = [d_deep, d_warm, d_test]
+        # v4: also test the very first expiry of the list, so the report shows the true depth (the ladder
+        # alone stops 400 days back and reported 2025-10-07 while candles exist from Oct 2024)
+        probes = [nifty_expiries[0], d_deep, d_warm, d_test]
         oldest_ok = None
         if target_exp and p11_rows:
             oldest_ok = p11_rows[0]["ts_open"].date()
@@ -581,7 +589,7 @@ def run_probe(settings: Settings, client: HttpClient, calendar: Optional[Calenda
         settings, today, recent_day, selected_plan, tests, client,
         option_history_oldest_date, expired_1m_max_span_days,
         sensex_option_history_available, analytics_accepted_for_expired,
-        v3_1m_max_span_days, oi_intraday_varies, oi_last_bar_equals_daily
+        v3_1m_max_span_days, oi_intraday_varies, oi_last_bar_equals_daily, pending_days=pending_days
     )
     if token_blocked:
         print(PROBE_TOKEN_BLOCKED)
@@ -593,7 +601,7 @@ def _write_reports(settings: Settings, today: dt.date, recent_day: dt.date, sele
                    tests: dict, client: HttpClient, option_history_oldest_date: Optional[str],
                    expired_1m_max_span_days: int, sensex_option_history_available: bool,
                    analytics_accepted_for_expired: bool, v3_1m_max_span_days: int,
-                   oi_intraday_varies: bool, oi_last_bar_equals_daily: bool) -> dict:
+                   oi_intraday_varies: bool, oi_last_bar_equals_daily: bool, pending_days=None) -> dict:
     calendar = load_calendar(settings.reference_dir)
     usable_start = settings.test_start
     if selected_plan == "A_PARTIAL" and option_history_oldest_date:
@@ -604,6 +612,7 @@ def _write_reports(settings: Settings, today: dt.date, recent_day: dt.date, sele
         "generated_utc": utc_iso(),
         "probe_date": iso(today),
         "recent_trading_day": iso(recent_day),
+        "newest_days_pending": list(pending_days or []),
         "selected_plan": selected_plan,
         "option_history_oldest_date": option_history_oldest_date,
         "expired_1m_max_span_days": expired_1m_max_span_days,
@@ -627,12 +636,13 @@ def _write_reports(settings: Settings, today: dt.date, recent_day: dt.date, sele
     lines = [
         f"UPDL PROBE REPORT ({iso(today)})",
         f"Selected Plan: {selected_plan}",
-        f"Recent Trading Day: {iso(recent_day)}",
+        f"Newest Day With Data: {iso(recent_day)}"
+        + (f" (abhi nahi aaye: {', '.join(pending_days)})" if pending_days else ""),
         f"Option History Oldest Date: {option_history_oldest_date}",
         f"Expired 1m Max Span Days: {expired_1m_max_span_days}",
         f"V3 1m Max Span Days: {v3_1m_max_span_days}",
         f"Sensex Option History Available: {sensex_option_history_available}",
-        f"Usable Window: {iso(usable_start)} to {iso(settings.test_end)} ({usable_trading_days} trading days)",
+        f"Manifest Window (full `download` only; `continue` picks its own week): {iso(usable_start)} to {iso(settings.test_end)} ({usable_trading_days} trading days)",
         f"API Calls Used: {client.calls_made} / {PROBE_BUDGET} (Master files: {client.file_downloads})",
         f"Largest Burst Without 429: {client.longest_ok_streak}",
         f"Rate Headers: {json.dumps(client.header_log)}",

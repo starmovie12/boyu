@@ -13,6 +13,7 @@ from collections import defaultdict
 from pathlib import Path
 from typing import Optional
 
+import numpy as np
 import pandas as pd
 
 from .errors import CorruptFile
@@ -99,10 +100,12 @@ def read_raw_payload(path) -> dict:
     return json.loads(gzip.decompress(Path(path).read_bytes()).decode("utf-8"))
 
 
-def verify_raw_integrity(state: State) -> list:
-    """Return the DONE raw files whose sha256 does not match the recorded value (or that are missing)."""
+def verify_raw_integrity(state: State, since_utc=None) -> list:
+    """Return the DONE raw files whose sha256 does not match the recorded value (or that are missing).
+    since_utc limits the check to chunks fetched since then (week mode: hashing the whole history on every
+    batch would take minutes on a phone)."""
     bad = []
-    for c in state.chunks(status=[DONE]):
+    for c in state.chunks(status=[DONE], since_utc=since_utc):
         p = c["raw_path"]
         if not p or c.get("error") == State.RAW_DELETED:
             continue
@@ -184,6 +187,72 @@ def rows_to_frame(rows: list, meta: dict, calendar, run_id: str, raw_sha: str) -
         "source": [meta.get("source", SOURCE_V3)] * n, "adjusted_status": ["UNVERIFIED"] * n,
         "fetch_run_id": [run_id] * n, "raw_sha256": [raw_sha] * n})
     return df[COLUMNS]
+
+
+def candles_frame(payload: dict, meta: dict, calendar, run_id: str, raw_sha: str, d0=None, d1=None):
+    """parse_candles + rows_to_frame on whole columns (v4): same rows, same columns, far fewer Python
+    objects. Returns (frame, bad_row_count); rows outside [d0, d1] are dropped. Any surprise in the payload
+    (for example mixed UTC offsets) falls back to the row-by-row reference path."""
+    raw = (payload.get("data") or {}).get("candles") or []
+    try:
+        good = [r for r in raw if isinstance(r, (list, tuple)) and len(r) >= 5 and isinstance(r[0], str)]
+        if not good:
+            return pd.DataFrame(columns=COLUMNS), len(raw)
+        arr = pd.DataFrame(good)
+        ts = pd.to_datetime(arr[0], format="ISO8601")
+        if ts.dt.tz is None:
+            raise ValueError("timestamp has no offset")
+        ohlc = [pd.to_numeric(arr[i], errors="raise").astype(float) for i in range(1, 5)]
+        keep = ~(ohlc[0].isna() | ohlc[1].isna() | ohlc[2].isna() | ohlc[3].isna())
+        ts_open = ts.dt.tz_convert(IST).dt.as_unit("us")
+        days = ts_open.dt.date
+        if d0 is not None:
+            keep &= (days >= to_date(d0)) & (days <= to_date(d1))
+        nbad = len(raw) - len(good) + int((~(ohlc[0].notna() & ohlc[1].notna() & ohlc[2].notna() & ohlc[3].notna())).sum())
+        seq = ts_open[keep].sort_values(kind="stable").index
+        n = len(seq)
+        if n == 0:
+            return pd.DataFrame(columns=COLUMNS), nbad
+        ts_open, days = ts_open.loc[seq].reset_index(drop=True), days.loc[seq].reset_index(drop=True)
+
+        def ints(col):
+            if col not in arr.columns:
+                return pd.array([pd.NA] * n, dtype="Int64")
+            vals = pd.to_numeric(arr[col].loc[seq], errors="raise").astype(float).to_numpy()
+            return pd.array(np.where(np.isnan(vals), np.nan, np.trunc(vals)), dtype="Float64").astype("Int64")
+
+        table = meta["table"]
+        has_volume = table not in NO_VOLUME_TABLES
+        v, oi = ints(5), ints(6)
+        if meta.get("interval") == "1d":
+            ts_close = pd.Series(pd.DatetimeIndex([dt.datetime(d.year, d.month, d.day, 23, 59, 59, 999000, tzinfo=IST)
+                                                   for d in days]))
+        else:
+            ts_close = ts_open + pd.Timedelta(minutes=1)
+        tags = {d: _session_tag(calendar, d) for d in set(days)}
+        strike = meta.get("strike")
+        df = pd.DataFrame({
+            "instrument_id": make_instrument_id(meta), "instrument_key": meta["instrument_key"],
+            "underlying": meta["underlying"], "segment": str(meta["instrument_key"]).split("|")[0],
+            "expiry_date": to_date(meta["expiry_date"]) if meta.get("expiry_date") else None,
+            "strike": float(strike) if strike is not None else float("nan"),
+            "option_type": meta.get("option_type"), "interval": meta.get("interval", "1m"),
+            "ts_open": ts_open, "ts_close": ts_close,
+            "o": ohlc[0].loc[seq].to_numpy(), "h": ohlc[1].loc[seq].to_numpy(),
+            "l": ohlc[2].loc[seq].to_numpy(), "c": ohlc[3].loc[seq].to_numpy(), "v": v, "oi": oi,
+            "has_volume": has_volume,
+            "is_stale": (v == 0).to_numpy(dtype=bool, na_value=False) if has_volume else False,
+            "is_filled": False, "session_type": [tags[d] for d in days], "trading_date": days,
+            "source": meta.get("source", SOURCE_V3), "adjusted_status": "UNVERIFIED",
+            "fetch_run_id": run_id, "raw_sha256": raw_sha}, index=range(n))
+        return df[COLUMNS], nbad
+    except Exception:
+        rows, nbad = parse_candles(payload)
+        if d0 is not None:
+            rows = [r for r in rows if to_date(d0) <= r["ts_open"].date() <= to_date(d1)]
+        if not rows:
+            return pd.DataFrame(columns=COLUMNS), nbad
+        return rows_to_frame(rows, meta, calendar, run_id, raw_sha), nbad
 
 
 # ---- parquet wrappers (the only place that touches the Parquet library) -------------------------------------------
@@ -273,18 +342,19 @@ def _window_batches(lo: dt.date, hi: dt.date, step_days: int = 10):
         cur = end + dt.timedelta(days=1)
 
 
-def compact(settings, calendar, log=None) -> dict:
+def compact(settings, calendar, log=None, since_utc=None, tick=None) -> dict:
     """Merge DONE raw chunks into one Parquet file per (table, underlying, trading_date).
     Within one fetch run a repeated (instrument_key, ts_open) is reported and removed; across runs the
-    latest fetch run wins. Re-running compact rebuilds the same result."""
+    latest fetch run wins. Re-running compact rebuilds the same result.
+    since_utc (week mode): only chunks fetched since then are read and merged into the existing files."""
     log = log or (lambda *a, **k: None)
     state = State(settings.state_dir)
     try:
-        bad = verify_raw_integrity(state)
+        bad = verify_raw_integrity(state, since_utc)
         if bad:
             raise CorruptFile("sha256 mismatch: " + "; ".join(bad[:5]))
         groups = defaultdict(list)
-        for c in state.chunks(status=[DONE]):
+        for c in state.chunks(status=[DONE], since_utc=since_utc):
             if c["raw_path"] and c["table_name"] and c.get("error") != State.RAW_DELETED:
                 groups[(c["table_name"], c["underlying"])].append(c)
         dupes_path = Path(settings.store_dir) / "_compaction_dupes.json"
@@ -294,18 +364,19 @@ def compact(settings, calendar, log=None) -> dict:
             lo = min(dt.date.fromisoformat(c["from_date"]) for c in chunks)
             hi = max(dt.date.fromisoformat(c["to_date"]) for c in chunks)
             for w0, w1 in _window_batches(lo, hi):
+                if tick:
+                    tick(f"{table} {und}")
                 frames = []
                 for c in chunks:
                     f, t = dt.date.fromisoformat(c["from_date"]), dt.date.fromisoformat(c["to_date"])
                     if t < w0 or f > w1:
                         continue
                     meta = json.loads(meta_path_of(c["raw_path"]).read_text(encoding="utf-8"))
-                    rows, nbad = parse_candles(read_raw_payload(c["raw_path"]))
+                    frame, nbad = candles_frame(read_raw_payload(c["raw_path"]), meta, calendar,
+                                                c["fetch_run_id"] or "r0", c["sha256"], w0, w1)
                     if nbad:
                         log("bad_rows", count=nbad, raw=c["raw_path"])
-                    rows = [r for r in rows if w0 <= r["ts_open"].date() <= w1]
-                    if rows:
-                        frame = rows_to_frame(rows, meta, calendar, c["fetch_run_id"] or "r0", c["sha256"])
+                    if len(frame):
                         # v3: "latest fetch wins" is decided by the fetch time stored in the state (ISO UTC,
                         # sortable). fetch_run_id is only rHHMMSS, so a next-morning re-fetch (r080000) sorted
                         # BEFORE the previous evening's run (r220000) and the older data won.

@@ -34,6 +34,9 @@ class Settings:
     max_calls: Optional[int] = None
     log_level: str = "INFO"
     refetch_last_day: bool = True
+    workers: int = 1                      # download worker threads (1 = sequential, the old behaviour)
+    progress: Optional[object] = None     # updl.progress.Progress or None (no live line)
+    warmup_items: Optional[set] = None    # None = warm-up for every item; a set = only these item ids (week mode)
 
     def __post_init__(self):
         self.root = Path(self.root)
@@ -67,6 +70,9 @@ class Settings:
     @property
     def max_per_30min(self) -> int:
         return int(self.params["RATE_MAX_PER_30MIN"])
+
+    def warmup_for(self, item_id: str, include_warmup: bool) -> bool:
+        return bool(include_warmup and (self.warmup_items is None or item_id in self.warmup_items))
 
     @property
     def data_rights(self) -> str:
