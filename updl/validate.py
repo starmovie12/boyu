@@ -154,7 +154,9 @@ def reconcile_bhavcopy(settings: Settings, calendar: Calendar) -> dict:
     if not bhav_dir.exists() or not list(bhav_dir.glob("*.csv")):
         return {"status": "NA-DATA", "days": 0, "suspect_days": [], "summary_lines": ["BHAVCOPY RECONCILIATION: NA-DATA"]}
 
-    col_map_cfg = load_yaml(settings.reference_dir / "bhavcopy_columns.yaml").get("columns", {})
+    bhav_cfg = load_yaml(settings.reference_dir / "bhavcopy_columns.yaml")
+    col_map_cfg = bhav_cfg.get("columns", {})
+    lot_cfg = bhav_cfg.get("optional_columns", {})
     rows_out = []
     summary_lines = []
     suspect_days = []
@@ -181,63 +183,65 @@ def reconcile_bhavcopy(settings: Settings, calendar: Calendar) -> dict:
             for part in ("dev", "holdout"):
                 for p in list_parts(settings.store_dir, part, tbl):
                     if date_of_part(p) == t_date:
-                        c_frames.append(read_parquet(p))
+                        c_frames.append(read_parquet(p, columns=["underlying", "expiry_date", "option_type",
+                                                                 "strike", "ts_open", "c", "v", "oi"]))
         if not c_frames:
             continue
         cdf = pd.concat(c_frames, ignore_index=True)
 
-        close_diffs = []
-        oi_diffs = []
-        vol_ratios = []
+        # v4.2 (real UDiFF file of 13 Nov 2026): OptnTp is empty for futures, TtlTradgVol counts CONTRACTS while
+        # OpnIntrst counts units; NewBrdLotQty converts contracts to units. One merge instead of a loop per row.
+        lot_pub = (lot_cfg or {}).get("lot_size")
+        b = pd.DataFrame({
+            "underlying": bdf["symbol"].astype(str).str.strip().str.upper(),
+            "expiry_date": [iso(to_date(str(x))) for x in bdf["expiry"]],
+            "option_type": bdf["option_type"].fillna("FUT").astype(str).str.strip().str.upper().replace("", "FUT"),
+            "strike_key": pd.to_numeric(bdf["strike"], errors="coerce").round(2).fillna(-1.0),
+            "bhav_close": pd.to_numeric(bdf["close"], errors="coerce"),
+            "bhav_oi": pd.to_numeric(bdf["open_interest"], errors="coerce"),
+            "bhav_contracts": pd.to_numeric(bdf["volume"], errors="coerce"),
+        })
+        lots = pd.to_numeric(bdf[lot_pub], errors="coerce") if lot_pub and lot_pub in bdf.columns else None
+        b["bhav_vol"] = b["bhav_contracts"] * lots if lots is not None else b["bhav_contracts"]
+        b.loc[b["option_type"] == "FUT", "strike_key"] = -1.0
+        b = b[b["underlying"].isin(set(cdf["underlying"].astype(str)))]
 
-        for _, brow in bdf.iterrows():
-            sym = str(brow.get("symbol", "")).strip().upper()
-            exp_d = to_date(str(brow.get("expiry", "")))
-            opt_t = str(brow.get("option_type", "FUT") or "FUT").strip().upper()
-            strk = brow.get("strike")
-            sub = cdf[(cdf["underlying"] == sym) & (cdf["expiry_date"].astype(str) == iso(exp_d)) &
-                      (cdf["option_type"] == opt_t)]
-            if opt_t in ("CE", "PE") and pd.notna(strk):
-                sub = sub[np.isclose(sub["strike"].astype(float), float(strk), atol=1e-2)]
-            if sub.empty:
-                continue
-            sub = sub.sort_values("ts_open")
-            c_close = float(sub["c"].iloc[-1])
-            c_oi = float(sub["oi"].dropna().iloc[-1]) if not sub["oi"].dropna().empty else 0.0
-            c_vol = float(sub["v"].dropna().sum())
-
-            b_close = float(brow.get("close", 0.0))
-            b_oi = float(brow.get("open_interest", 0.0))
-            b_vol = float(brow.get("volume", 0.0))
-
-            cdiff = abs(c_close - b_close)
-            odiff = abs(c_oi - b_oi)
+        cdf = cdf.sort_values("ts_open", kind="stable")
+        cdf["expiry_date"] = cdf["expiry_date"].astype(str)
+        cdf["option_type"] = cdf["option_type"].astype(str)
+        cdf["strike_key"] = pd.to_numeric(cdf["strike"], errors="coerce").round(2).fillna(-1.0)
+        cdf.loc[cdf["option_type"] == "FUT", "strike_key"] = -1.0
+        keys = ["underlying", "expiry_date", "option_type", "strike_key"]
+        g = cdf.groupby(keys, sort=False)
+        agg = pd.DataFrame({"candle_close": g["c"].last(), "candle_oi": g["oi"].last(),
+                            "candle_vol": g["v"].sum(min_count=1)}).reset_index()
+        m = b.merge(agg, on=keys, how="inner")
+        close_diffs, vol_ratios = [], []
+        for r in m.itertuples(index=False):
+            c_oi = float(r.candle_oi) if pd.notna(r.candle_oi) else 0.0
+            c_vol = float(r.candle_vol) if pd.notna(r.candle_vol) else 0.0
+            b_close = float(r.bhav_close) if pd.notna(r.bhav_close) else 0.0
+            b_oi = float(r.bhav_oi) if pd.notna(r.bhav_oi) else 0.0
+            b_vol = float(r.bhav_vol) if pd.notna(r.bhav_vol) else 0.0
+            cdiff = abs(float(r.candle_close) - b_close)
             vratio = (c_vol / b_vol) if b_vol > 0 else 1.0
-
             close_diffs.append(cdiff)
-            oi_diffs.append(odiff)
-            vol_ratios.append(vratio)
+            if b_vol > 0:
+                vol_ratios.append(vratio)
             rows_out.append({
-                "trading_date": iso(t_date),
-                "underlying": sym,
-                "expiry_date": iso(exp_d),
-                "strike": strk,
-                "option_type": opt_t,
-                "candle_close": c_close,
-                "bhav_close": b_close,
-                "close_abs_diff": round(cdiff, 4),
-                "candle_oi": c_oi,
-                "bhav_oi": b_oi,
-                "oi_abs_diff": round(odiff, 2),
-                "candle_vol": c_vol,
-                "bhav_vol": b_vol,
+                "trading_date": iso(t_date), "underlying": r.underlying, "expiry_date": r.expiry_date,
+                "strike": None if r.strike_key < 0 else r.strike_key, "option_type": r.option_type,
+                "candle_close": float(r.candle_close), "bhav_close": b_close, "close_abs_diff": round(cdiff, 4),
+                "candle_oi": c_oi, "bhav_oi": b_oi, "oi_abs_diff": round(abs(c_oi - b_oi), 2),
+                "candle_vol": c_vol, "bhav_vol": b_vol,
+                "bhav_contracts": float(r.bhav_contracts) if pd.notna(r.bhav_contracts) else None,
                 "volume_ratio": round(vratio, 4),
             })
 
         if close_diffs:
             med_c = float(np.median(close_diffs))
             p95_c = float(np.percentile(close_diffs, 95))
-            med_vr = float(np.median(vol_ratios))
+            med_vr = float(np.median(vol_ratios)) if vol_ratios else 1.0
             suspect = not (0.95 <= med_vr <= 1.05)
             flag_txt = "VOLUME_UNIT_SUSPECT" if suspect else "VOLUME_UNIT_OK"
             if suspect:

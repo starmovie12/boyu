@@ -34,6 +34,7 @@ from .sessions import Calendar, load_calendar
 from .store import (TABLE_METADATA, date_of_part, list_parts, part_path, partition_of,
                     read_parquet, write_parquet)
 from .timeutil import IST, at_ist, iso, to_date
+from .volextras import atm_and_skew, gamma_flip, iv_daily_rows, term_spread, vega_vec
 
 
 # ---- Black-76 pricing, IV solver & Greeks (Section 9.3) ---------------------------------------------------------
@@ -351,6 +352,7 @@ def _derive_option_day(und: str, d: dt.date, odf: pd.DataFrame, sdf: pd.DataFram
 
     iv, status = solve_iv_vec(c, F, K, T, is_call, stale, iv_bounds)
     delta, gamma, theta = greeks_vec(F, K, T, iv, is_call)
+    vega = vega_vec(F, K, T, iv)
 
     step = strike_step(np.unique(K), default_step)
     with np.errstate(invalid="ignore"):
@@ -374,7 +376,7 @@ def _derive_option_day(und: str, d: dt.date, odf: pd.DataFrame, sdf: pd.DataFram
         "spot_asof_DERIVED": spot, "spot_age_min": spot_age, "spot_is_filled": spot_filled,
         "forward_DERIVED": F, "forward_source": src_g[grp],
         "iv_DERIVED": iv, "delta_DERIVED": delta, "gamma_DERIVED": gamma, "theta_DERIVED": theta,
-        "iv_status": status,
+        "vega_DERIVED": vega, "iv_status": status,
         "volume_baseline_same_dte_DERIVED": vb_same, "baseline_same_dte_status": st_same,
         "volume_baseline_any_dte_DERIVED": vb_any, "baseline_any_dte_status": st_any,
         "half_spread_PROXY": half_sp, "modelled_ask_PROXY": c + half_sp, "fillable": fillable,
@@ -409,6 +411,9 @@ def _derive_option_day(und: str, d: dt.date, odf: pd.DataFrame, sdf: pd.DataFram
         for nm in names:
             met[nm][sel] = mm[nm][g_time[sel]]
     g_age = spot_age[first_idx]
+    atm_iv, skew = atm_and_skew(grp, n_g, K, F, iv, delta, is_call)
+    flip = gamma_flip(grp, n_g, F, K, T, iv, is_call, oi, spot, g_spot)
+    term = term_spread(g_time, g_exp, atm_iv)
     metrics_df = pd.DataFrame({
         "underlying": und, "trading_date": d, "expiry_date": g_exp, "ts_open": g_open, "ts_close": g_close,
         "pcr_DERIVED": met["pcr"], "call_oi_wall_DERIVED": met["call_oi_wall"],
@@ -416,7 +421,9 @@ def _derive_option_day(und: str, d: dt.date, odf: pd.DataFrame, sdf: pd.DataFram
         "n_strikes_DERIVED": np.nan_to_num(met["n_strikes"]).astype("int64"),
         "n_oi_known_DERIVED": np.nan_to_num(met["n_oi_known"]).astype("int64"),
         "n_oi_carried_DERIVED": np.nan_to_num(met["n_oi_carried"]).astype("int64"),
-        "gex_proxy_PROXY": gex_g, "spot_asof_DERIVED": g_spot, "spot_age_min": g_age,
+        "gex_proxy_PROXY": gex_g, "gamma_flip_PROXY": flip, "atm_iv_DERIVED": atm_iv, "skew_DERIVED": skew,
+        "vix_term_DERIVED": term, "dte_bucket": dte_row[first_idx],
+        "spot_asof_DERIVED": g_spot, "spot_age_min": g_age,
         "spot_is_filled": pd.array(np.where(np.isnan(g_age), None, g_age >= 1.0), dtype="boolean"),
         "available_from_ts": g_close,
     })
@@ -529,6 +536,10 @@ def run_derive(settings: Settings, calendar: Optional[Calendar] = None, window: 
                 write_parquet(df, part_path(settings.store_dir, part_name, table, und, d),
                               {**TABLE_METADATA, "table": table})
                 written_files += 1
+            ivd = iv_daily_rows(metrics_df, und, d)
+            write_parquet(ivd, part_path(settings.store_dir, part_name, "iv_daily_DERIVED", und, d),
+                          {**TABLE_METADATA, "table": "iv_daily_DERIVED"})
+            written_files += 1
             hist = _trim_hist(pd.concat([hist, day_hist], ignore_index=True)) if len(day_hist) else hist
 
     return {"files_written": written_files}

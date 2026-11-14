@@ -35,6 +35,7 @@ from .marketinfo import run_marketinfo
 from .messages import REPAIR_HINT, SDCARD_HINT
 from .plan import run_download
 from .probe import check_probe_fresh, run_probe
+from .spreadreport import recorder_days, run_spread_report
 from .runlock import RECORD_LOCK_NAME, RunLock
 from .sessions import Calendar, load_calendar
 from .state import FAILED_PERMANENT, FAILED_RETRYABLE, INCOMPLETE, State
@@ -216,8 +217,10 @@ def package_week(settings: Settings, tag: str, start: dt.date, end: dt.date, val
     xcheck = settings.workdir / "xcheck_csv"
     if xcheck.exists():                 # small: the whole exchange-side folder travels with every batch
         shutil.copytree(xcheck, week_dir / "xcheck_csv", copy_function=shutil.copyfile)
+    if recorder_days(settings, start, end):           # real bid/ask spreads of the recorded days in this window
+        run_spread_report(settings, start, end, say=lambda *_a: None)
     for rep in ("health.csv", "health_summary.txt", "reconciliation.csv", "day_status.csv", "holes.csv",
-                "strategy_ready_days.csv"):          # data_coverage.csv: only fresh, from `coverage` / export
+                "strategy_ready_days.csv", "spread_report.csv", "adjusted_status.csv"):          # data_coverage.csv: only fresh, from `coverage` / export
         if (settings.reports_dir / rep).exists():
             shutil.copyfile(settings.reports_dir / rep, week_dir / rep)
     per_index = ", ".join(f"{u} {c['option_rows']} option-minutes / {c['contracts']} contracts" for u, c in lay.items())

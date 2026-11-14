@@ -5,6 +5,7 @@ Commands:
   continue = one WEEK per run (newest first, then one week further back each time); `--window-days 0` = old month mode
   export (phone CSV zip, option chain at time T) | record (live option-chain Recorder)
   repair (queue failed chunks again; good chunks are never downloaded twice)
+  spread-report (real bid/ask spreads from the Recorder's files: reports/spread_report.csv)
   coverage (what is on disk; which index-days are ready for a backtest: reports/strategy_ready_days.csv)
   export --layout (per-index 1-minute CSV + ai_ready Parquet + README_FOR_AI.md for --test-start..--test-end)
   history (fast lane: index + VIX 1-minute and daily from Jan 2022, no options; `--back-to DATE` to shorten)
@@ -17,6 +18,7 @@ from typing import Optional
 from .client import HttpClient, RateLimiter
 from .config import load_settings
 from .coverage import run_coverage
+from .spreadreport import run_spread_report
 from .derive import run_derive
 from .errors import (EXIT_OK, EXIT_OTHER_ERROR, EXIT_SOME_NOT_OK, UpdlError)
 from .export import DEFAULT_EVERY_MIN, run_export
@@ -40,7 +42,7 @@ from .weekly import DEFAULT_WINDOW_DAYS, run_history, run_week_batches
 
 COMMANDS = ("probe", "plan", "download", "continue", "month", "compact",
             "validate", "derive", "report", "handoff", "verify", "ingest", "export", "record", "repair", "history",
-            "coverage")
+            "coverage", "spread-report")
 LOCKED_COMMANDS = ("download", "continue", "month", "repair", "history")     # one state writer per workdir (record: own lock)
 
 
@@ -166,6 +168,10 @@ def _dispatch(cmd, args, settings, client, limiter, calendar, rlog, secrets, sle
 
         if cmd == "coverage":
             run_coverage(settings, calendar, start=args.test_start, end=args.test_end)
+            return EXIT_OK
+
+        if cmd == "spread-report":
+            run_spread_report(settings, start=args.test_start, end=args.test_end)
             return EXIT_OK
 
         if cmd == "history":

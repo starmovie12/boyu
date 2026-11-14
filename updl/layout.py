@@ -45,6 +45,7 @@ Har index ka alag folder: NIFTY/, BANKNIFTY/, SENSEX/
   spot_1m.csv             index ka 1-minute candle: time, open, high, low, close
   futures_1m.csv          index futures 1-minute: time, expiry, instrument_key, OHLC, volume, oi
   contracts.csv           is window ke saare option contracts: expiry, strike, CE/PE, lot_size, pehla/aakhri din
+  recorder_quotes/        Recorder ke din (live bid/ask har snapshot; <date>_ltp.csv = spot, future, VIX)
   options_1m/<expiry>.csv har option ka har minute (LONG format: ek line = ek contract ka ek minute):
                           time, strike, option_type (CE/PE), open, high, low, close, volume, oi, instrument_key
                           40 MB se badi file `<expiry>_from_<date>.csv` mein aage chalti hai.
@@ -92,6 +93,9 @@ class SplitCsv:
         header = (",".join(self.columns) + "\n").encode("utf-8")
         if self.path is None or self.path.stat().st_size + len(body) > self.max_bytes:
             name = f"{self.stem}.csv" if self.path is None else f"{self.stem}_from_{iso(day)}.csv"
+            n = 2
+            while self.folder / name in self.files:        # one big day can need more than one split
+                name, n = f"{self.stem}_from_{iso(day)}_{n}.csv", n + 1
             self.path = self.folder / name
             self.folder.mkdir(parents=True, exist_ok=True)
             self.path.write_bytes(header)
@@ -152,6 +156,35 @@ def _lot_sizes(settings: Settings) -> dict:
         return {k: v for k, v in cat.db.execute("SELECT instrument_key, lot_size FROM contracts") if v}
     finally:
         cat.close()
+
+
+def _copy_recorder(settings: Settings, und: str, start: dt.date, end: dt.date, folder: Path) -> int:
+    """Recorder v2 files of this index and window (live bid/ask snapshots and the LTP file), under the same
+    40 MB rule; read in blocks so a long recorded day does not fill a phone's memory."""
+    src = Path(settings.workdir) / "recorder" / und
+    rows = 0
+    if not src.exists():
+        return 0
+    for f in sorted(src.glob("????-??-??*.csv")):
+        day = to_date(f.name[:10])
+        if not start <= day <= end:
+            continue
+        cols = list(pd.read_csv(f, nrows=0).columns)
+        out = SplitCsv(folder, f.stem, cols)
+        for block in pd.read_csv(f, dtype=str, keep_default_na=False, chunksize=100_000):
+            out.append(block, day)
+        rows += out.rows
+    return rows
+
+
+def load_ai_ready(folder, underlying: str, include_holdout: bool = False) -> pd.DataFrame:
+    """Default loader for ai_ready/: development days only. include_holdout=True only for the one final test."""
+    folder = Path(folder)
+    parts = [folder / "ai_ready" / f"{underlying}_options_1m.parquet"]
+    if include_holdout:
+        parts.append(folder / "ai_ready" / "holdout" / f"{underlying}_options_1m.parquet")
+    frames = [read_parquet(p) for p in parts if p.exists()]
+    return pd.concat(frames, ignore_index=True) if frames else pd.DataFrame()
 
 
 def write_raw_index(settings: Settings, start: dt.date, end: dt.date, out_dir: Path) -> int:
@@ -242,6 +275,7 @@ def write_layout(settings: Settings, start, end, out_dir, tick=None) -> dict:
             raise
         for w in ai.values():
             w.close()
+        counts["recorder_rows"] = _copy_recorder(settings, und, start, end, udir / "recorder_quotes")
         if contracts:
             udir.mkdir(parents=True, exist_ok=True)
             with open(udir / "contracts.csv", "w", encoding="utf-8", newline="") as fh:
@@ -269,7 +303,13 @@ and `ai_ready/holdout/`).
   contract. Columns: time (IST, candle START), strike, option_type (CE/PE), open, high, low, close, volume, oi,
   instrument_key (+ trading_date, underlying, expiry in Parquet).
 - `<INDEX>/spot_1m.csv` (index, no volume), `<INDEX>/futures_1m.csv`, `<INDEX>/contracts.csv` (lot_size).
-- `store/` all tables, incl. derived `iv_greeks_1m` and `chain_metrics_1m` (PCR, OI walls, max pain). Every
+- `<INDEX>/recorder_quotes/` (only for days the Recorder ran): live bid, ask and their quantities per snapshot;
+  `spread_report.csv` summarises the spreads by moneyness, days to expiry and hour.
+- Python: `from updl.layout import load_ai_ready; df = load_ai_ready(folder, "NIFTY")` loads development days
+  only; `include_holdout=True` is for the single final test.
+- `store/` all tables, incl. derived `iv_greeks_1m` (IV, delta, gamma, theta, vega), `chain_metrics_1m` (PCR,
+  OI walls, max pain, ATM IV, 25-delta skew, near-minus-next term spread, gamma flip PROXY) and
+  `iv_daily_DERIVED` (ATM IV known at 10:00 and 14:00). Every
   derived row has `available_from_ts`: never use a value before that time. (Weekly batch folders carry `store/`;
   an `export --layout` folder does not: use the Parquet store in the updl workdir.)
 - `xcheck_csv/`: exchange-side PCR / max pain / OI / FII-DII; values of day D are usable only from the next session.

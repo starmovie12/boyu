@@ -33,7 +33,7 @@ from .messages import (CTRL_C, DATA_RIGHTS_WARNING, PLAN_A_PARTIAL, PLAN_B, PLAN
 ROUTING_CODE = "UDAPI1021"          # "key format": a key was sent to the endpoint that does not serve it
 ROUTING_BREAKER_LIMIT = 5
 from .probe import check_probe_fresh
-from .selector import (Contract, DayStats, chunk_days, contract_chunks, first_seen_hides,
+from .selector import (Contract, DayStats, chunk_days, contract_chunks, expiry_period_days, first_seen_hides,
                        futures_expiries_for_day, monthly_expiries, select_day_options)
 from .sessions import Calendar, load_calendar
 from .state import (DONE, EMPTY_OK, FAILED_PERMANENT, FAILED_RETRYABLE, Catalog,
@@ -337,6 +337,16 @@ def build_selection_plan(settings: Settings, calendar: Optional[Calendar] = None
                 p1_rows = [r for r in stock_rows if r.get("group") in ("NIFTY50", "SENSEX")
                            and (r.get("symbol") or "").strip() not in p0_syms]
                 if not p1_rows:
+                    # v4.2: the official Nifty 50 list (opened 14 Nov 2026) ships in reference/; the owner's own
+                    # NIFTY50 / SENSEX rows in external/stocks.csv always win over it.
+                    ref_list = settings.reference_dir / "stocks_nifty50_sensex.csv"
+                    if ref_list.exists():
+                        with open(ref_list, "r", encoding="utf-8") as fh:
+                            ref_rows = _resolve_stock_rows(list(csv.DictReader(fh)), masters.get("NSE", []),
+                                                           lambda *a, **k: None)
+                        p1_rows = [r for r in ref_rows if r.get("group") in ("NIFTY50", "SENSEX")
+                                   and (r.get("symbol") or "").strip() not in p0_syms]
+                if not p1_rows:
                     skipped_items["D10"] = "SKIPPED_NO_LIST"
                     print("D10: SKIPPED_NO_LIST (NIFTY50/SENSEX stock rows absent in external/stocks.csv)")
                     continue
@@ -481,9 +491,18 @@ def build_selection_plan(settings: Settings, calendar: Optional[Calendar] = None
                                 selected_days_by_contract[c.instrument_key].append(d)
                                 contract_obj[c.instrument_key] = c
 
+                    # the full expiry list (catalog), not only expiries with contracts in this window: the previous
+                    # expiry is what bounds a contract's period
+                    known_exps = sorted(set(all_exps) | set(catalog.expiries(und))) if catalog else all_exps
+                    period_exps = monthly_expiries(known_exps) if (item_id != "D05" and settings.is_monthly(und)) \
+                        else known_exps
                     for ck, cdays in sorted(selected_days_by_contract.items()):
                         c = contract_obj[ck]
                         cap_c = v3_cap if c.source == "listed" else exp_cap
+                        if item_id in ("D06", "D08") and c.source == "expired":
+                            # C3: the contract's whole expiry period in one call; later batches find it covered
+                            cdays = sorted(set(cdays) | set(expiry_period_days(c.expiry_date, period_exps, cap_c,
+                                                                               calendar, oldest_opt)))
                         cov = state.covered_dates(cov_key(ck, "1m")) if state else set()
                         # v4: D06 (band) and D08 (wide chain) select many of the same contract-days; a day
                         # already planned in this run is not requested a second time

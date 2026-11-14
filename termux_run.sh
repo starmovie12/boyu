@@ -9,6 +9,8 @@
 #   bash termux_run.sh repair     put failed chunks back in the queue (good chunks are never re-downloaded)
 #   bash termux_run.sh history    index + VIX 1-minute history from Jan 2022 (about 250 calls, no options)
 #   bash termux_run.sh record     live option-chain Recorder (market time only)
+#   bash termux_run.sh coverage   what is on disk; strategy-ready days; adjusted-price check
+#   bash termux_run.sh spread-report   real bid/ask spreads from the Recorder's days
 #   bash termux_run.sh export     phone CSV zip of the downloaded window
 #   bash termux_run.sh <command>  any other `python -m updl` command
 set -e

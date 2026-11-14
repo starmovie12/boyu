@@ -16,11 +16,11 @@ Order: open PR A -> time-critical B1, B2 (Recorder must be ready before Mon 16 N
 | A5 | Run lock, SQLite integrity_check, stale .tmp cleanup | medium | Fable | Max | DONE | in PR #4 |
 | B1 | Exchange-side data now: PCR, max pain, OI, change-in-OI, FII/DII (retention ~2 weeks) | medium | Fable | Extra High | DONE | in PR #4 |
 | B2 | Recorder v2 (REST): multi-expiry, spot/VIX/future LTP, gaps file, daily summary, shared limiter | medium | Fable | Extra High | DONE | in PR #4 |
-| C3 | Fewer calls: whole contract life per call where it helps; optional spot/VIX fast lane from Jan 2022 | medium | Fable | Extra High | DONE | in PR #4 (`history`); whole-life chunks not built, DECISIONS 33 |
+| C3 | Fewer calls: whole contract life per call where it helps; optional spot/VIX fast lane from Jan 2022 | medium | Fable | Extra High | DONE | `history` lane + whole expiry period per call (DECISIONS 38) |
 | C1 | Per-underlying export: spot_1m.csv, contracts.csv, options_1m/<expiry>.csv, futures_1m.csv, ai_ready parquet, 40 MB split | big | Opus | Extra High | DONE | updl/layout.py; tests/test_v42_layout.py |
 | C2 | `coverage` + strategy_ready_days.csv + README_FOR_AI.md | medium | Opus | High | DONE | updl/coverage.py; README_FOR_AI in layout.py; tests/test_v42_layout.py |
-| C4 | Owner-file schemas + validators (events, constituents, corporate actions, participant OI); stock lists only from an official page; derived extras | big | Opus | High | DONE (schemas, validators, ISINs) | left: derived extras + spread-report (needs Recorder days); stock lists = owner file |
+| C4 | Owner-file schemas + validators (events, constituents, corporate actions, participant OI); stock lists only from an official page; derived extras | big | Opus | High | DONE (lists, bhavcopy, extras, spread-report, verdict) | -- |
 | R1 | Code review / integration test of the Fable work (A, B) | medium | Opus | High | DONE (V26-V31 fixed, 80 tests) | -- |
-| D1 | README table "kya milta hai / kya nahi", CHANGELOG, PR texts, this board | small | Sonnet | High | NEXT | switch to Sonnet: CHANGELOG_v4 (V26-V31), PR #4 text, README check |
+| D1 | README table "kya milta hai / kya nahi", CHANGELOG, PR texts, this board | small | Sonnet | High | DONE | -- |
 
 Not possible at all (no task): bid/ask history, tick data, old exchange-side PCR/max pain/OI (lost after ~2 weeks).
