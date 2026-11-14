@@ -52,7 +52,7 @@ def solve_iv_vec(price, F, K, T, is_call, is_stale, bounds=(0.0001, 5.0), iters:
         status[idx[low_side]] = "BELOW_INTRINSIC"
         for _ in range(iters):
             mid = 0.5 * (lo + hi)
-            above = black76_price_vec(f, k, t, mid, c) - p > 0
+            above = black76_price_vec(f, k, t, mid, c) - p >= 0     # >=: the smallest root, like the scalar solver
             hi = np.where(above, mid, hi)
             lo = np.where(above, lo, mid)
         iv[idx[ok]] = (0.5 * (lo + hi))[ok]
