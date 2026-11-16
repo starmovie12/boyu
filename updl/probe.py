@@ -64,6 +64,18 @@ def _check_expired_key_format(key: str) -> bool:
         return False
 
 
+class _Skip(Exception):
+    """A probe test that does not apply to the selected index / items (no call is made)."""
+
+
+def _plain_key(spot_key: str) -> str:
+    """'RESOLVE_FROM_MASTER:NSE_INDEX:Nifty Bank' -> 'NSE_INDEX|Nifty Bank' (used only when the master is missing)."""
+    if spot_key.startswith("RESOLVE_FROM_MASTER:"):
+        seg, name = spot_key.split(":", 2)[1:]
+        return f"{seg}|{name}"
+    return spot_key
+
+
 def check_probe_fresh(settings: Settings, secrets=()) -> dict:
     """Enforce Section 4: download is refused unless probe_report.json exists, is <7 days old, and holds no secrets."""
     p = settings.probe_json
@@ -104,6 +116,11 @@ def run_probe(settings: Settings, client: HttpClient, calendar: Optional[Calenda
     tests = {}
     masters = {}
     resolved_keys = {}
+    # v5 (fetch): the probe tests the FIRST selected index (all indices: NIFTY, as before; `fetch BANKNIFTY`:
+    # BANKNIFTY) plus India VIX; BSE and global checks run only when such an index / item is selected
+    primary = (settings.instrument_names() or [None])[0]
+    main_exch = settings.exchange_of(primary) if primary else "NSE"
+    bse_unds = [u for u in settings.instrument_names() if settings.exchange_of(u) == "BSE"]
     plus_required = False
     expired_1m_max_span_days = 0
     option_history_oldest_date = None
@@ -139,12 +156,11 @@ def run_probe(settings: Settings, client: HttpClient, calendar: Optional[Calenda
             resolved_keys[und] = key
             candidates_map[und] = cands
 
-        nifty_opts = listed_contracts(masters.get("NSE", []), resolved_keys.get("NIFTY", "NSE_INDEX|Nifty 50"),
-                                      kinds=("CE", "PE"))
-        sample_opt = nifty_opts[0] if nifty_opts else {}
+        idx_opts = listed_contracts(masters.get(main_exch, []), resolved_keys.get(primary, ""), kinds=("CE", "PE"))
+        sample_opt = idx_opts[0] if idx_opts else {}
         rec("P01", "PASS", 200, files=file_info, resolved_keys=resolved_keys,
-            candidates=candidates_map,
-            nifty_option_spec={
+            candidates=candidates_map, option_spec_index=primary,
+            option_spec={
                 "lot_size": sample_opt.get("lot_size"),
                 "tick_size": sample_opt.get("tick_size"),
                 "freeze_quantity": sample_opt.get("freeze_quantity"),
@@ -157,17 +173,19 @@ def run_probe(settings: Settings, client: HttpClient, calendar: Optional[Calenda
         rec("P01", "FAIL", getattr(err, "status", 0), error=str(err))
         for und in settings.instrument_names():
             sk = settings.spot_key(und)
-            resolved_keys[und] = sk.split(":")[-1] if sk.startswith("RESOLVE_FROM_MASTER:") else sk
+            resolved_keys[und] = _plain_key(sk)
 
-    nifty_key = resolved_keys.get("NIFTY", "NSE_INDEX|Nifty 50")
-    sensex_key = resolved_keys.get("SENSEX", "BSE_INDEX|SENSEX")
+    main_key = resolved_keys.get(primary) or _plain_key(settings.spot_key(primary))
+    bse_key = (resolved_keys.get(bse_unds[0]) or _plain_key(settings.spot_key(bse_unds[0]))) if bse_unds else None
+    if not bse_unds:
+        sensex_option_history_available = None        # not tested in this run: unknown, never "False"
     vix_key = settings.spot_key("INDIAVIX") if "INDIAVIX" in settings.instruments else "NSE_INDEX|India VIX"
 
     # ---- P02: V3 1-minute Nifty spot, recent day ---------------------------
     p02_rows = []
     pending_days = []
     try:
-        res = client.get(v3_candle_path(nifty_key, "minutes", 1, iso(recent_day), iso(recent_day)), kind="v3")
+        res = client.get(v3_candle_path(main_key, "minutes", 1, iso(recent_day), iso(recent_day)), kind="v3")
         p02_rows, _ = parse_candles(res.json)
         # v4: the newest session reaches the historical API only some hours after the close (seen live:
         # 13 Nov still empty at 01:25 on 14 Nov). Step back to the newest day that is really served, so
@@ -177,7 +195,7 @@ def run_probe(settings: Settings, client: HttpClient, calendar: Optional[Calenda
                 break
             pending_days.append(iso(recent_day))
             recent_day = calendar.prev_trading_day(recent_day)
-            res = client.get(v3_candle_path(nifty_key, "minutes", 1, iso(recent_day), iso(recent_day)), kind="v3")
+            res = client.get(v3_candle_path(main_key, "minutes", 1, iso(recent_day), iso(recent_day)), kind="v3")
             p02_rows, _ = parse_candles(res.json)
         if p02_rows:
             first_ts = p02_rows[0]["ts"]
@@ -201,7 +219,7 @@ def run_probe(settings: Settings, client: HttpClient, calendar: Optional[Calenda
     # ---- P04: V3 daily Nifty, 5 days ---------------------------------------
     try:
         d_from = recent_day - dt.timedelta(days=7)
-        res = client.get(v3_candle_path(nifty_key, "days", 1, iso(recent_day), iso(d_from)), kind="v3")
+        res = client.get(v3_candle_path(main_key, "days", 1, iso(recent_day), iso(d_from)), kind="v3")
         rows, _ = parse_candles(res.json)
         rec("P04", "PASS" if rows else "FAIL", res.status, bar_count=len(rows), sample=_sample_candles(rows))
     except (ApiError, RetryExhausted, BudgetExceeded) as err:
@@ -212,7 +230,7 @@ def run_probe(settings: Settings, client: HttpClient, calendar: Optional[Calenda
     for sp in (28, 31, 32, 62):
         d_from = recent_day - dt.timedelta(days=sp - 1)
         try:
-            res = client.get(v3_candle_path(nifty_key, "minutes", 1, iso(recent_day), iso(d_from)), kind="v3")
+            res = client.get(v3_candle_path(main_key, "minutes", 1, iso(recent_day), iso(d_from)), kind="v3")
             rows, _ = parse_candles(res.json)
             if rows:
                 span_results[str(sp)] = "PASS"
@@ -229,8 +247,8 @@ def run_probe(settings: Settings, client: HttpClient, calendar: Optional[Calenda
     # ---- P06: V3 3-minute and 15-minute Nifty, 28 days ---------------------
     try:
         d_from = recent_day - dt.timedelta(days=27)
-        r3 = client.get(v3_candle_path(nifty_key, "minutes", 3, iso(recent_day), iso(d_from)), kind="v3")
-        r15 = client.get(v3_candle_path(nifty_key, "minutes", 15, iso(recent_day), iso(d_from)), kind="v3")
+        r3 = client.get(v3_candle_path(main_key, "minutes", 3, iso(recent_day), iso(d_from)), kind="v3")
+        r15 = client.get(v3_candle_path(main_key, "minutes", 15, iso(recent_day), iso(d_from)), kind="v3")
         rows3, _ = parse_candles(r3.json)
         rows15, _ = parse_candles(r15.json)
         rec("P06", "PASS" if (rows3 and rows15) else "FAIL", r15.status,
@@ -239,7 +257,7 @@ def run_probe(settings: Settings, client: HttpClient, calendar: Optional[Calenda
         rec("P06", "FAIL", getattr(err, "status", 0), error=str(err))
 
     # ---- P07: current-month Nifty future, 1-minute, 1 day ------------------
-    futs = sorted(listed_contracts(masters.get("NSE", []), nifty_key, kinds=("FUT",)),
+    futs = sorted(listed_contracts(masters.get(main_exch, []), main_key, kinds=("FUT",)),
                   key=lambda c: c["expiry_date"])
     if futs:
         try:
@@ -256,7 +274,7 @@ def run_probe(settings: Settings, client: HttpClient, calendar: Optional[Calenda
     # ---- P08: active Nifty option near the money, 1-minute, 1 day ----------
     p08_passed = False
     p08_rows = []
-    opts = listed_contracts(masters.get("NSE", []), nifty_key, kinds=("CE", "PE"))
+    opts = listed_contracts(masters.get(main_exch, []), main_key, kinds=("CE", "PE"))
     spot_ref = p02_rows[-1]["c"] if p02_rows else 25000.0
     if opts:
         nearest_exp = min(c["expiry_date"] for c in opts)
@@ -279,7 +297,7 @@ def run_probe(settings: Settings, client: HttpClient, calendar: Optional[Calenda
     try:
         # Only the analytics token set: P09 itself is the proof test for it (rule 2); nothing is assumed.
         p09_kind = "expired_analytics" if expired_token_used == "analytics" else "expired"
-        res = client.get("/v2/expired-instruments/expiries", {"instrument_key": nifty_key}, kind=p09_kind)
+        res = client.get("/v2/expired-instruments/expiries", {"instrument_key": main_key}, kind=p09_kind)
         raw_exps = res.json.get("data") if isinstance(res.json.get("data"), list) else []
         nifty_expiries = sorted({to_date(x) for x in raw_exps if x})
         if nifty_expiries:
@@ -327,7 +345,7 @@ def run_probe(settings: Settings, client: HttpClient, calendar: Optional[Calenda
         target_exp = _nearest_date(nifty_expiries, recent_day - dt.timedelta(days=140))
         try:
             res = client.get("/v2/expired-instruments/option/contract",
-                             {"instrument_key": nifty_key, "expiry_date": iso(target_exp)}, kind="expired")
+                             {"instrument_key": main_key, "expiry_date": iso(target_exp)}, kind="expired")
             contracts = res.json.get("data") or []
             if contracts:
                 sample_exp_contract = min(
@@ -393,7 +411,7 @@ def run_probe(settings: Settings, client: HttpClient, calendar: Optional[Calenda
             # nearest to the target, got an empty list and reported FAIL (HTTP 200)
             fut_exp = _nearest_date(monthly_expiries(nifty_expiries), recent_day - dt.timedelta(days=140))
             res_f = client.get("/v2/expired-instruments/future/contract",
-                               {"instrument_key": nifty_key, "expiry_date": iso(fut_exp)}, kind="expired")
+                               {"instrument_key": main_key, "expiry_date": iso(fut_exp)}, kind="expired")
             f_list = res_f.json.get("data") or []
             if f_list:
                 fk = f_list[0].get("instrument_key") or f_list[0].get("expired_instrument_key")
@@ -408,12 +426,18 @@ def run_probe(settings: Settings, client: HttpClient, calendar: Optional[Calenda
             rec("P14", "FAIL", getattr(err, "status", 0), error=str(err))
 
         try:
-            res_bse = client.get("/v2/expired-instruments/expiries", {"instrument_key": sensex_key}, kind="expired")
+            if not bse_unds:
+                raise _Skip()
+            if bse_key == main_key:         # fetch SENSEX: P09-P11 already were the BSE expired-data test
+                sensex_option_history_available = bool(p11_passed)
+                rec("P15", "PASS" if p11_passed else "FAIL", 0, bse_supported=bool(p11_passed), reason="SAME_AS_P11")
+                raise _Skip("done")
+            res_bse = client.get("/v2/expired-instruments/expiries", {"instrument_key": bse_key}, kind="expired")
             bse_exps = sorted({to_date(x) for x in (res_bse.json.get("data") if isinstance(res_bse.json.get("data"), list) else []) if x})
             if bse_exps:
                 b_exp = _nearest_date(bse_exps, recent_day - dt.timedelta(days=60))
                 res_bc = client.get("/v2/expired-instruments/option/contract",
-                                    {"instrument_key": sensex_key, "expiry_date": iso(b_exp)}, kind="expired")
+                                    {"instrument_key": bse_key, "expiry_date": iso(b_exp)}, kind="expired")
                 b_contracts = res_bc.json.get("data") or []
                 if b_contracts:
                     bk = b_contracts[0].get("instrument_key") or b_contracts[0].get("expired_instrument_key")
@@ -427,13 +451,16 @@ def run_probe(settings: Settings, client: HttpClient, calendar: Optional[Calenda
                     rec("P15", "FAIL", res_bc.status, bse_supported=False)
             else:
                 rec("P15", "FAIL", res_bse.status, bse_supported=False)
+        except _Skip as skip:
+            if not skip.args:
+                rec("P15", "UNVERIFIED", 0, reason="NO_BSE_INDEX_SELECTED")
         except (ApiError, RetryExhausted, BudgetExceeded) as err:
             rec("P15", "FAIL", getattr(err, "status", 0), bse_supported=False, error=str(err))
 
         if client.tokens.analytics and client.tokens.access:
             try:
                 res_a = client.get("/v2/expired-instruments/expiries",
-                                   {"instrument_key": nifty_key}, kind="expired_analytics")
+                                   {"instrument_key": main_key}, kind="expired_analytics")
                 analytics_accepted_for_expired = res_a.status == 200
                 rec("P16", "PASS" if analytics_accepted_for_expired else "FAIL", res_a.status,
                     analytics_accepted_for_expired=analytics_accepted_for_expired)
@@ -451,6 +478,8 @@ def run_probe(settings: Settings, client: HttpClient, calendar: Optional[Calenda
     gift_key = find_global(g_rows, "GIFT NIFTY")
     yield_hits = search_global(g_rows)
     try:
+        if not settings.item_selected("D11"):
+            raise _Skip()
         u_bars, g_bars = 0, 0
         st_code = 0
         if usdinr_key:
@@ -463,6 +492,8 @@ def run_probe(settings: Settings, client: HttpClient, calendar: Optional[Calenda
             g_bars, st_code = len(g_r), rg.status
         rec("P17", "PASS" if (u_bars or g_bars) else "UNVERIFIED", st_code,
             usdinr_bars=u_bars, gift_bars=g_bars, india_10y_yield_candidates=yield_hits)
+    except _Skip:
+        rec("P17", "UNVERIFIED", 0, reason="D11_NOT_SELECTED")
     except (ApiError, RetryExhausted, BudgetExceeded) as err:
         rec("P17", "UNVERIFIED", getattr(err, "status", 0), india_10y_yield_candidates=yield_hits, error=str(err))
 
@@ -474,11 +505,14 @@ def run_probe(settings: Settings, client: HttpClient, calendar: Optional[Calenda
         "sensex_option": None,
     }
     try:
-        rs = client.get(v3_candle_path(sensex_key, "minutes", 1, iso(recent_day), iso(recent_day)), kind="v3")
-        s_rows, _ = parse_candles(rs.json)
+        s_rows = []
+        if bse_unds and bse_key != main_key:
+            rs = client.get(v3_candle_path(bse_key, "minutes", 1, iso(recent_day), iso(recent_day)), kind="v3")
+            s_rows, _ = parse_candles(rs.json)
         if s_rows:
             obs_last["sensex_spot"] = s_rows[-1]["ts"][11:16]
-        s_opts = listed_contracts(masters.get("BSE", []), sensex_key, kinds=("CE", "PE"))
+        s_opts = listed_contracts(masters.get("BSE", []), bse_key, kinds=("CE", "PE")) \
+            if (bse_unds and bse_key != main_key) else []
         if s_opts:
             rso = client.get(v3_candle_path(s_opts[0]["instrument_key"], "minutes", 1, iso(recent_day), iso(recent_day)),
                              kind="v3")
@@ -511,7 +545,7 @@ def run_probe(settings: Settings, client: HttpClient, calendar: Optional[Calenda
             tested_exps.add(exp_d)
             try:
                 rc = client.get("/v2/expired-instruments/option/contract",
-                                {"instrument_key": nifty_key, "expiry_date": iso(exp_d)}, kind="expired")
+                                {"instrument_key": main_key, "expiry_date": iso(exp_d)}, kind="expired")
                 clist = rc.json.get("data") or []
                 if not clist:
                     continue
@@ -618,6 +652,7 @@ def _write_reports(settings: Settings, today: dt.date, recent_day: dt.date, sele
         "expired_1m_max_span_days": expired_1m_max_span_days,
         "v3_1m_max_span_days": v3_1m_max_span_days,
         "sensex_option_history_available": sensex_option_history_available,
+        "probed_indices": settings.instrument_names(),
         "analytics_accepted_for_expired": analytics_accepted_for_expired,
         "oi_intraday_varies": oi_intraday_varies,
         "oi_last_bar_equals_daily": oi_last_bar_equals_daily,

@@ -151,7 +151,7 @@ def _effective_plan(settings: Settings, probe_data: Optional[dict]) -> str:
     return "A"
 
 
-def _window_bounds(settings: Settings, calendar: Calendar, win_spec: list, underlying: str = "NIFTY",
+def _window_bounds(settings: Settings, calendar: Calendar, win_spec: list, underlying: Optional[str] = None,
                    include_warmup: bool = True, oldest_opt_date: Optional[dt.date] = None):
     end = settings.test_end
     start = settings.test_start
@@ -161,7 +161,7 @@ def _window_bounds(settings: Settings, calendar: Calendar, win_spec: list, under
         elif "warmup_1m" in win_spec:
             start = settings.warmup_1m_start
         elif "warmup_option" in win_spec:
-            w_days = settings.option_warmup_days(underlying)
+            w_days = settings.option_warmup_days(underlying or "")
             start = calendar.shift(settings.test_start, -w_days)
     if oldest_opt_date and ("warmup_option" in win_spec or "test" in win_spec):
         if oldest_opt_date > start:
@@ -308,9 +308,10 @@ def build_selection_plan(settings: Settings, calendar: Optional[Calendar] = None
 
             elif item_id == "D09":
                 stock_rows = _ensure_stocks_csv(settings, masters.get("NSE", []))
-                p0_rows = [r for r in stock_rows if r.get("group") in ("HEAVY", "BANK")]
+                # stock groups come from settings (fetch: the chosen index's manifest row; else HEAVY + BANK)
+                p0_rows = [r for r in stock_rows if r.get("group") in settings.stock_groups]
                 seen_syms = set()
-                w0, w1 = _window_bounds(settings, calendar, item.get("window", []), "NIFTY", inc_w)
+                w0, w1 = _window_bounds(settings, calendar, item.get("window", []), None, inc_w)
                 tdays = calendar.trading_days(w0, w1)
                 for r in p0_rows:
                     sym = (r.get("symbol") or "").strip()
@@ -332,9 +333,12 @@ def build_selection_plan(settings: Settings, calendar: Optional[Calendar] = None
                     })
 
             elif item_id == "D10":
+                if not settings.wide_stock_groups:
+                    skipped_items["D10"] = "NOT_FOR_THIS_INDEX"     # fetch BANKNIFTY: no constituent list needed
+                    continue
                 stock_rows = _ensure_stocks_csv(settings, masters.get("NSE", []))
-                p0_syms = {(r.get("symbol") or "").strip() for r in stock_rows if r.get("group") in ("HEAVY", "BANK")}
-                p1_rows = [r for r in stock_rows if r.get("group") in ("NIFTY50", "SENSEX")
+                p0_syms = {(r.get("symbol") or "").strip() for r in stock_rows if r.get("group") in settings.stock_groups}
+                p1_rows = [r for r in stock_rows if r.get("group") in settings.wide_stock_groups
                            and (r.get("symbol") or "").strip() not in p0_syms]
                 if not p1_rows:
                     # v4.2: the official Nifty 50 list (opened 14 Nov 2026) ships in reference/; the owner's own
@@ -344,14 +348,14 @@ def build_selection_plan(settings: Settings, calendar: Optional[Calendar] = None
                         with open(ref_list, "r", encoding="utf-8") as fh:
                             ref_rows = _resolve_stock_rows(list(csv.DictReader(fh)), masters.get("NSE", []),
                                                            lambda *a, **k: None)
-                        p1_rows = [r for r in ref_rows if r.get("group") in ("NIFTY50", "SENSEX")
+                        p1_rows = [r for r in ref_rows if r.get("group") in settings.wide_stock_groups
                                    and (r.get("symbol") or "").strip() not in p0_syms]
                 if not p1_rows:
                     skipped_items["D10"] = "SKIPPED_NO_LIST"
-                    print("D10: SKIPPED_NO_LIST (NIFTY50/SENSEX stock rows absent in external/stocks.csv)")
+                    print(f"D10: SKIPPED_NO_LIST ({'/'.join(settings.wide_stock_groups)} stock rows absent in external/stocks.csv)")
                     continue
                 seen_syms = set()
-                w0, w1 = _window_bounds(settings, calendar, item.get("window", []), "NIFTY", False)
+                w0, w1 = _window_bounds(settings, calendar, item.get("window", []), None, False)
                 tdays = calendar.trading_days(w0, w1)
                 for r in p1_rows:
                     sym = (r.get("symbol") or "").strip()
@@ -375,7 +379,7 @@ def build_selection_plan(settings: Settings, calendar: Optional[Calendar] = None
             elif item_id == "D11":
                 g_cfg = load_yaml(settings.reference_dir / "globals.yaml")
                 g_rows = masters.get("global", [])
-                w0, w1 = _window_bounds(settings, calendar, item.get("window", []), "NIFTY", False)
+                w0, w1 = _window_bounds(settings, calendar, item.get("window", []), None, False)
                 tdays = calendar.trading_days(w0, w1)
                 for gname in g_cfg.get("names", []):
                     gk = find_global(g_rows, gname)

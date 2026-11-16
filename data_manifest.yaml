@@ -18,9 +18,9 @@ params:
   WINDOW_DAYS: 7                      # `continue` batch size in calendar days (0 = old calendar-month mode)
   DATA_RIGHTS: "UNVERIFIED"           # OK | MINIMAL | NOT_ALLOWED | UNVERIFIED
 instruments:
-  NIFTY:     {spot_key: "NSE_INDEX|Nifty 50", exchange: NSE, fo_segment: NSE_FO, expiry: weekly_tuesday, strike_step_default: 50}
-  BANKNIFTY: {spot_key: "RESOLVE_FROM_MASTER:NSE_INDEX:Nifty Bank", exchange: NSE, fo_segment: NSE_FO, expiry: monthly_last_tuesday, strike_step_default: 100}
-  SENSEX:    {spot_key: "RESOLVE_FROM_MASTER:BSE_INDEX:SENSEX", exchange: BSE, fo_segment: BSE_FO, expiry: weekly_thursday, strike_step_default: 100}
+  NIFTY:     {spot_key: "NSE_INDEX|Nifty 50", exchange: NSE, fo_segment: NSE_FO, expiry: weekly_tuesday, strike_step_default: 50, label: "NIFTY 50", menu_no: 2, stock_groups: [HEAVY], wide_stock_groups: [NIFTY50]}
+  BANKNIFTY: {spot_key: "RESOLVE_FROM_MASTER:NSE_INDEX:Nifty Bank", exchange: NSE, fo_segment: NSE_FO, expiry: monthly_last_tuesday, strike_step_default: 100, label: "BANK NIFTY", menu_no: 1, stock_groups: [BANK], wide_stock_groups: []}
+  SENSEX:    {spot_key: "RESOLVE_FROM_MASTER:BSE_INDEX:SENSEX", exchange: BSE, fo_segment: BSE_FO, expiry: weekly_thursday, strike_step_default: 100, label: "SENSEX", menu_no: 3, stock_groups: [HEAVY], wide_stock_groups: [SENSEX]}
   INDIAVIX:  {spot_key: "NSE_INDEX|India VIX", exchange: NSE}
 # Download order (dependencies): D12 -> D01..D04 -> D09 -> D07 -> D05 -> D06 -> D08 -> D10 -> D11.  D06/D08 need D01 (day high/low) and D03 (VIX) first.
 items:

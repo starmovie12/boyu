@@ -37,6 +37,10 @@ class Settings:
     workers: int = 1                      # download worker threads (1 = sequential, the old behaviour)
     progress: Optional[object] = None     # updl.progress.Progress or None (no live line)
     warmup_items: Optional[set] = None    # None = warm-up for every item; a set = only these item ids (week mode)
+    skip_items: set = field(default_factory=set)          # items switched off for this run (fetch: D11)
+    only_index: Optional[str] = None      # fetch: the one index this run works on (restrict_to)
+    stock_groups: tuple = ("HEAVY", "BANK")               # D09 stock groups (all indices: the old behaviour)
+    wide_stock_groups: tuple = ("NIFTY50", "SENSEX")      # D10 stock groups
 
     def __post_init__(self):
         self.root = Path(self.root)
@@ -93,6 +97,38 @@ class Settings:
     def instrument_names(self):
         return [k for k in self.instruments if k != "INDIAVIX"]
 
+    def menu_indices(self) -> list:
+        """Indices offered by the `fetch` menu, sorted by the manifest's menu_no."""
+        rows = [(int(v["menu_no"]), k) for k, v in self.instruments.items() if v.get("menu_no") is not None]
+        return [k for _n, k in sorted(rows)]
+
+    def index_label(self, underlying: str) -> str:
+        return str(self.instruments.get(underlying, {}).get("label") or underlying)
+
+    def resolve_index(self, text: str) -> Optional[str]:
+        """'banknifty', 'BANK NIFTY', 'nifty 50' -> the manifest name, or None."""
+        want = str(text or "").replace(" ", "").replace("_", "").upper()
+        for k in self.menu_indices():
+            if want in (k.upper(), self.index_label(k).replace(" ", "").upper()):
+                return k
+        return None
+
+    def restrict_to(self, index: str, with_globals: bool = False) -> str:
+        """fetch: work on ONE index (+ India VIX, which the strike band needs). Every loop over
+        settings.instruments / instrument_names() then sees only that index. D09/D10 stock groups come from the
+        index's manifest row; D11 (globals) is switched off unless with_globals."""
+        name = self.resolve_index(index)
+        if name is None:
+            raise ValueError(f"unknown index {index!r}")
+        cfg = self.instruments[name]
+        self.instruments = {k: v for k, v in self.instruments.items() if k in (name, "INDIAVIX")}
+        self.only_index = name
+        self.stock_groups = tuple(cfg.get("stock_groups") or ())
+        self.wide_stock_groups = tuple(cfg.get("wide_stock_groups") or ())
+        if not with_globals:
+            self.skip_items = set(self.skip_items) | {"D11"}
+        return name
+
     def is_monthly(self, underlying: str) -> bool:
         return str(self.instruments[underlying].get("expiry", "")).startswith("monthly")
 
@@ -103,7 +139,7 @@ class Settings:
         return self.instruments[underlying]["spot_key"]
 
     def item_selected(self, item_id: str) -> bool:
-        return self.items_filter is None or item_id in self.items_filter
+        return (self.items_filter is None or item_id in self.items_filter) and item_id not in self.skip_items
 
     # ---- folder layout ----------------------------------------------------
     @property

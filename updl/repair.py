@@ -68,6 +68,8 @@ def run_repair(settings: Settings, calendar: Optional[Calendar] = None) -> dict:
 
     cursor = load_cursor(settings)
     cursor["repair_days"] = sorted(set(cursor.get("repair_days") or []) | {iso(d) for d in days})
+    from .fetch import mark_fetch_repair
+    n_fetch = mark_fetch_repair(settings, days) if not settings.dry_run else 0
     if not settings.dry_run:
         save_cursor(settings, cursor)
 
@@ -80,6 +82,8 @@ def run_repair(settings: Settings, calendar: Optional[Calendar] = None) -> dict:
         for (item, und), n in sorted(by_item.items()):
             print(f"  {item} {und}: {n} chunks")
         print("Ab chalao: bash termux_run.sh continue   (pehle yahi repair wale din aayenge)")
+        if n_fetch:
+            print(f"`fetch` ke {n_fetch} hafte bhi dobara banenge: bash termux_run.sh fetch (wahi index aur hafte)")
     else:
         print("Repair: dobara try karne layak kuch nahi bacha (jo fail hue the woh baad mein aa chuke hain).")
     return {"failed_rows": removed, "retry_chunks": len(pending), "routing_failures": n_routing,

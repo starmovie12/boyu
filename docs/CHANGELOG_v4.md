@@ -76,3 +76,10 @@ cloud ke 22 s se kai guna (ESTIMATE 1-2 min). Target "8 minute ke andar" phone p
 * Live numbers: calls per week after C3, minutes per week, holes before/after `repair` on the phone state: NOT RUN LIVE (token deleted). Owner ke pehle `continue` ke baad `holes.csv` aur final box mein dikhenge.
 * Sensex constituents, weights, events, corporate actions, participant OI: owner files (templates ready).
 * A, B aur C teeno ek hi PR (#4) mein hain, kyunki kaam ek hi branch par hota hai.
+
+## v5 (PROMPT_05): `fetch` — ek index, kitne hafte
+* `bash termux_run.sh fetch` (ya sirf `bash termux_run.sh`): menu poochta hai index (1 BANK NIFTY, 2 NIFTY 50, 3 SENSEX) aur hafte (koi bhi number), phir sirf wahi data aaj se peeche `Download/BOYU_Data/<INDEX>/` mein. Bina menu: `--index BANKNIFTY --weeks 15 --yes`.
+* Sirf chuna index + VIX: probe, plan, exchange data, validate, derive, reports, layout sab usi par. D09 BANK / HEAVY, D10 NIFTY50 / SENSEX / skip, D11 sirf `--with-globals`.
+* Apna cursor per index; dobara chalane par sirf naye din; ruk jaye to wahin se; `repair` fetch ke hafte bhi wapas laata hai.
+* Hard-coded NIFTY hata: planner windows, newest-day check, probe.
+* Tests: 102 passed (11 naye in `tests/test_v5_fetch.py`, sab mock transport par). Live API: NOT RUN LIVE.

@@ -9,10 +9,13 @@ Commands:
   coverage (what is on disk; which index-days are ready for a backtest: reports/strategy_ready_days.csv)
   export --layout (per-index 1-minute CSV + ai_ready Parquet + README_FOR_AI.md for --test-start..--test-end)
   history (fast lane: index + VIX 1-minute and daily from Jan 2022, no options; `--back-to DATE` to shorten)
+  fetch (ONE index, N weeks back from today, into Download/BOYU_Data/<INDEX>/; asks with a menu, or
+         --index BANKNIFTY --weeks 15 --yes)
 """
 from __future__ import annotations
 
 import argparse
+import sys
 from typing import Optional
 
 from .client import HttpClient, RateLimiter
@@ -42,8 +45,8 @@ from .weekly import DEFAULT_WINDOW_DAYS, run_history, run_week_batches
 
 COMMANDS = ("probe", "plan", "download", "continue", "month", "compact",
             "validate", "derive", "report", "handoff", "verify", "ingest", "export", "record", "repair", "history",
-            "coverage", "spread-report")
-LOCKED_COMMANDS = ("download", "continue", "month", "repair", "history")     # one state writer per workdir (record: own lock)
+            "coverage", "spread-report", "fetch")
+LOCKED_COMMANDS = ("download", "continue", "month", "repair", "history", "fetch")   # one state writer per workdir (record: own lock)
 
 
 def build_parser() -> argparse.ArgumentParser:
@@ -74,7 +77,11 @@ def build_parser() -> argparse.ArgumentParser:
     p.add_argument("--with-warmup", action="store_true", help="Old month mode only: include the option warm-up window")
     p.add_argument("--window-days", type=int, default=None,
                    help=f"continue: calendar days per batch (default {DEFAULT_WINDOW_DAYS}; 0 = old calendar-month mode)")
-    p.add_argument("--weeks", type=int, default=1, help="continue: run this many batches in one go (default 1)")
+    p.add_argument("--weeks", default=None,
+                   help="continue: run this many batches in one go (default 1); fetch: weeks back from today")
+    p.add_argument("--index", default=None, help="fetch: BANKNIFTY, NIFTY or SENSEX (else the menu asks)")
+    p.add_argument("--yes", "-y", action="store_true", help="fetch: start without the Enter question")
+    p.add_argument("--with-globals", action="store_true", help="fetch: also download D11 (USD INR, crude, GIFT Nifty)")
     p.add_argument("--reset-cursor", action="store_true",
                    help="continue: forget the batch cursor and start again at today (covered days are not re-downloaded)")
     p.add_argument("--back-to", default=None, help="continue: oldest date to walk back to (default 2024-10-01); history: first day (default 2022-01-03)")
@@ -97,7 +104,8 @@ class _NoNetworkTransport:
         raise RuntimeError("Network calls are disabled in dry-run mode")
 
 
-def main(argv: Optional[list] = None, transport=None, environ=None, sleep=None) -> int:
+def main(argv: Optional[list] = None, transport=None, environ=None, sleep=None, ask=None,
+         interactive: Optional[bool] = None) -> int:
     parser = build_parser()
     args = parser.parse_args(argv)
 
@@ -144,12 +152,29 @@ def main(argv: Optional[list] = None, transport=None, environ=None, sleep=None) 
         client = HttpClient(**kw_cli)
 
         cmd = args.command
+        if cmd == "fetch":
+            # the questions come first: before the run lock and before the live progress line
+            from .fetch import MenuStop, choose
+            try:
+                args.fetch_choice = choose(
+                    settings, index_arg=args.index, weeks_arg=args.weeks, yes=args.yes,
+                    interactive=sys.stdin.isatty() if interactive is None else interactive,
+                    ask=ask or input, today=args.today, calendar=calendar, phone_dir=args.phone_dir)
+            except MenuStop as stop:
+                print(stop.message)
+                return stop.code
         if cmd in LOCKED_COMMANDS and not settings.dry_run:
             with RunLock(settings.state_dir, cmd):
                 startup_checks(settings)
                 return _dispatch(cmd, args, settings, client, limiter, calendar, rlog, secrets, sleep)
         return _dispatch(cmd, args, settings, client, limiter, calendar, rlog, secrets, sleep)
 
+    except KeyboardInterrupt:
+        if getattr(args, "command", None) != "fetch":
+            raise
+        # fetch: Ctrl+C anywhere ends with a plain line (the lock is released, the cursor knows where it stopped)
+        print("\nRuk gaya (Ctrl+C). Wahi command, wahi choice dobara chalao: jahan ruka wahin se aage badhega.")
+        return 130
     except UpdlError as err:
         if err.message:
             print(err.message)
@@ -193,6 +218,28 @@ def _dispatch(cmd, args, settings, client, limiter, calendar, rlog, secrets, sle
             run_probe(settings, client, calendar=calendar, probe_today=args.today)
             return EXIT_OK
 
+        if cmd == "fetch":
+            from .fetch import run_fetch
+            index, weeks = args.fetch_choice
+            progress = None
+            if not settings.dry_run:
+                progress = Progress(limiter=limiter).start()
+                if sleep is None:
+                    client.sleep = progress.sleep
+                    limiter.sleep = progress.sleep
+            try:
+                res = run_fetch(settings, client, index, weeks, calendar=load_calendar(settings.reference_dir),
+                                today_override=args.today, phone_dir=args.phone_dir, run_id=rlog.run_id, log=rlog,
+                                secrets=secrets, progress=progress, with_globals=args.with_globals)
+            finally:
+                if progress is not None:
+                    progress.stop()
+            if settings.dry_run:
+                total = sum((w.get("plan_summary") or {}).get("total_calls", 0) for w in res["windows"])
+                print(f"fetch --dry-run: {res['weeks']} hafte, kareeb {total} calls (ESTIMATE; jo din pehle se "
+                      f"hain woh is ginti mein bhi hain, asli run mein nahi lagenge).")
+            return EXIT_OK
+
         if cmd == "plan":
             run_plan_command(settings, calendar=calendar)
             return EXIT_OK
@@ -217,7 +264,7 @@ def _dispatch(cmd, args, settings, client, limiter, calendar, rlog, secrets, sle
             try:
                 res = run_week_batches(
                     settings, client, calendar=load_calendar(settings.reference_dir),
-                    today_override=args.today, window_days=window_days, weeks=args.weeks,
+                    today_override=args.today, window_days=window_days, weeks=int(args.weeks or 1),
                     phone_dir=args.phone_dir, run_id=rlog.run_id, log=rlog, secrets=secrets,
                     reset_cursor=args.reset_cursor, until=args.back_to, progress=progress
                 )

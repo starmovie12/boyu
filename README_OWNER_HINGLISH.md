@@ -338,3 +338,33 @@ bash termux_run.sh coverage
 * **Naye derived columns** (`store/`, apne aap): `vega_DERIVED`; chain metrics mein ATM IV, 25-delta skew, near-minus-next term spread, gamma flip (PROXY); `iv_daily_DERIVED` (10:00 aur 14:00 ka ATM IV).
 * **Kam calls**: expire ho chuke contract ka poora expiry period ab ek hi call mein aata hai (pehle har hafte alag call). Weekly contract: 2 call se 1; BANKNIFTY monthly: ~5 se 1 (ESTIMATE, live nahi chala).
 * Recorder ke din har hafte ke folder mein `<INDEX>/recorder_quotes/` mein bhi aate hain.
+
+## 20. Sirf ek index ka data (`fetch`) — sabse aasaan tareeka
+```bash
+cd ~/boyu && bash termux_run.sh update
+```
+```bash
+bash termux_run.sh fetch
+```
+(Sirf `bash termux_run.sh` likhoge to bhi yahi menu khulega.)
+
+Example: menu mein pehle `1` (BANK NIFTY), phir `15` (15 hafte), phir Enter:
+```
+Kis index ka data chahiye?
+  1 = BANK NIFTY
+  2 = NIFTY 50
+  3 = SENSEX
+Number likho (1/2/3): 1
+Kitne hafte ka data chahiye (aaj se peeche)?
+  ...
+Hafte: 15
+BANK NIFTY | 15 hafte | 2026-08-01 se 2026-11-13
+Folder: /sdcard/Download/BOYU_Data/BANKNIFTY/
+Enter = shuru, n = ruk jao:
+```
+* Data jaata hai: `Download/BOYU_Data/BANKNIFTY/week_NN_<start>_to_<end>/` aur `Download/BOYU_Data/BANKNIFTY/INDEX.txt`. NIFTY aur SENSEX ke apne folder. Purane `BOYU_Data/week_...` folder ko haath nahi lagta.
+* Sirf chuna hua index + India VIX aata hai. BANK NIFTY: sirf bank stocks; NIFTY 50: heavyweights + Nifty50 list; SENSEX: heavyweights (Sensex ki list aapki file se). Global (USD INR, crude, GIFT Nifty) sirf `--with-globals` par.
+* Dobara chalao to jo hafte aa chuke hain woh dobara download nahi hote: sirf naye din. Pehle 2 hafte, baad mein 15 = sirf bache 13 hafte.
+* Beech mein ruk gaya (phone band, Ctrl+C, internet) to wahi command, wahi choice: jahan ruka wahin se aage.
+* Aakhir ke box mein `ADHURA` aaye to: `bash termux_run.sh repair`, phir wahi `fetch`.
+* Bina sawal ke: `bash termux_run.sh fetch --index BANKNIFTY --weeks 15 --yes`

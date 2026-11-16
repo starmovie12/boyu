@@ -22,5 +22,6 @@ Order: open PR A -> time-critical B1, B2 (Recorder must be ready before Mon 16 N
 | C4 | Owner-file schemas + validators (events, constituents, corporate actions, participant OI); stock lists only from an official page; derived extras | big | Opus | High | DONE (lists, bhavcopy, extras, spread-report, verdict) | -- |
 | R1 | Code review / integration test of the Fable work (A, B) | medium | Opus | High | DONE (V26-V31 fixed, 80 tests) | -- |
 | D1 | README table "kya milta hai / kya nahi", CHANGELOG, PR texts, this board | small | Sonnet | High | DONE | -- |
+| F1 | PROMPT_05 `fetch`: one index, N weeks, menu, own cursor, per-index phone folder | big | Opus | High | DONE (102 tests) | -- |
 
 Not possible at all (no task): bid/ask history, tick data, old exchange-side PCR/max pain/OI (lost after ~2 weeks).
