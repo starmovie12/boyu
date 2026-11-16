@@ -140,6 +140,24 @@ def chunk_days(days: Iterable, cap_calendar_days: int) -> list:
     return out
 
 
+def expiry_period_days(expiry, expiries: Iterable, cap_calendar_days: int, calendar, not_before=None) -> list:
+    """C3 (v4.2): every trading day on which `expiry` is a selected expiry, i.e. from the previous expiry in the
+    list (that day also takes the next expiry) up to the expiry itself. A 7-day batch window is not aligned
+    with expiries, so a weekly contract used to be fetched by two batches (two calls); one expired-endpoint call
+    can span cap_calendar_days, so the whole period now comes in one call and the next batch finds it covered.
+    Returns [] when there is no previous expiry or the period does not fit in one call."""
+    expiry = to_date(expiry)
+    prev = [to_date(e) for e in expiries if to_date(e) < expiry]
+    if cap_calendar_days <= 1 or not prev:
+        return []
+    start = max(prev)
+    if not_before is not None and to_date(not_before) > start:
+        start = to_date(not_before)
+    if (expiry - start).days + 1 > cap_calendar_days:
+        return []
+    return calendar.trading_days(start, expiry)
+
+
 def contract_chunks(selected_days: Iterable, covered: set, cap_calendar_days: int, calendar) -> list:
     """Chunks for one contract. cap 1: only selected, uncovered days. Larger cap: first..last selected
     uncovered day in cap-sized windows; days inside a window come for free (all trading days are marked covered)."""

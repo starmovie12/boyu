@@ -17,6 +17,7 @@ from pathlib import Path
 from typing import Optional
 
 from .config import Settings
+from .corpactions import run_adjusted_status
 from .sessions import Calendar, instrument_class
 from .store import list_parts, part_path, partition_of, read_parquet
 from .timeutil import iso, to_date
@@ -29,7 +30,9 @@ DATA_SETS = [("D01", "spot_1m", "index 1-minute"), ("D02", "spot_1d", "index dai
              ("D04", "vix_1d", "VIX daily"), ("D05", "fut_1m", "index futures 1-minute"),
              ("D06", "opt_1m", "options 1-minute, band"), ("D08", "opt_wide_1m", "options 1-minute, wide chain"),
              ("D09", "stock_1m", "stocks 1-minute"), ("D11", "global_1m", "global instruments 1-minute"),
-             ("DER", "iv_greeks_1m", "derived IV / greeks"), ("DER", "chain_metrics_1m", "derived PCR / walls / max pain")]
+             ("DER", "iv_greeks_1m", "derived IV / greeks / vega"),
+             ("DER", "chain_metrics_1m", "derived PCR / walls / max pain / ATM IV / skew / term / gamma flip"),
+             ("DER", "iv_daily_DERIVED", "derived ATM IV at 10:00 and 14:00")]
 OWNER_FILES = [("D13", "bhavcopy", "NSE F&O bhavcopy (external/bhavcopy/)"),
                ("D14", "participant_oi.csv", "participant-wise OI (external/participant_oi.csv)"),
                ("D18", "events.csv", "event calendar (external/events.csv)"),
@@ -252,4 +255,5 @@ def run_coverage(settings: Settings, calendar: Calendar, start=None, end=None, s
         return {"data_sets": sets, "days": None}
     res = write_strategy_ready(settings, calendar, first, last)
     say(f"{iso(first)} se {iso(last)}: " + summary_line(res) + " (reports/strategy_ready_days.csv)")
-    return {"data_sets": sets, "days": res}
+    adj = run_adjusted_status(settings, calendar, say=say)
+    return {"data_sets": sets, "days": res, "adjusted": adj}

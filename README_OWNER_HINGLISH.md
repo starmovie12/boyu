@@ -293,7 +293,9 @@ bash termux_run.sh record
 | Live bid/ask, spread | Sirf aage ke liye | `record` roz |
 | Purana bid/ask, tick data | **Nahi mil sakta** | Upstox deta hi nahi |
 | Purana exchange PCR / max pain (2 hafte se zyada) | **Nahi mil sakta** | chala gaya |
-| Event calendar, Nifty50 ke saare stocks/weights, bhavcopy, participant OI | Upstox se nahi | aapko file deni hogi (agla PR template dega) |
+| Nifty50 ke 50 stocks 1-minute | Haan | `continue` (D10, official list repo mein) |
+| Real spread ka hisaab (moneyness, expiry tak din, ghanta) | Sirf Recorder wale din | `spread-report` |
+| Event calendar, Sensex list, weights, corporate actions, bhavcopy, participant OI | Upstox se nahi | aapko file deni hogi (section 18, templates) |
 
 ## 18. Aapko kaunsi files deni hain (Upstox yeh data nahi deta)
 Template (sirf header line) `reference/owner_templates/` mein hain. File bharo, phir:
@@ -310,7 +312,8 @@ Galti hogi to program line number ke saath batayega aur file copy nahi karega. K
 | `participant_oi.csv` | date, client_type (FII/DII/Pro/Client/TOTAL), long, short | NSE "participant wise OI" report | FII/Pro positioning (din D ka data agle din se) |
 | `bhavcopy/` | NSE F&O UDiFF zip jaisa mila waisa | NSE all-reports derivatives | Upstox candles ka independent cross-check |
 
-* Nifty50 aur Sensex ke saare stocks ki list: official page (niftyindices.com, nsearchives) yahan se khul nahi paya, isliye list nahi banayi (invent nahi karta). `external/stocks.csv` mein group `NIFTY50` / `SENSEX` ki lines daaloge to D10 apne aap chalega.
+* Nifty50 ke 50 stocks ki list ab official NSE file se repo mein hai (`reference/stocks_nifty50_sensex.csv`, 14 Nov 2026), isliye D10 ab chalta hai (43 naye stocks; 7 pehle se D09 mein). Sensex ki official BSE list nahi khuli, isliye Sensex ki lines aap `external/stocks.csv` mein group `SENSEX` ke saath daal sakte ho.
+* Bhavcopy: asli NSE file (13 Nov 2026) se columns check ho gaye. NSE ki file mein volume **lots** mein hota hai (units nahi); program ab lot size se guna karke milata hai.
 * Check karo kya mila / kya missing hai:
 ```bash
 python -m updl coverage
@@ -320,3 +323,48 @@ python -m updl coverage
 ```bash
 python -m updl export --layout --test-start 2024-10-01 --test-end 2026-11-13
 ```
+
+## 19. Naye report (v4.2 aakhri hissa)
+* **Spread report** (Recorder chalne ke baad, shaam ko):
+```bash
+bash termux_run.sh spread-report
+```
+  `reports/spread_report.csv`: ATM / NEAR / FAR / DEEP strike, expiry tak kitne din, aur ghante ke hisaab se asli bid-ask spread (rupaye aur % mein). Backtest ka slippage isse kam mat rakho.
+* **Coverage + adjusted check**:
+```bash
+bash termux_run.sh coverage
+```
+  `corporate_actions.csv` diya ho to yeh bhi batata hai ki Upstox ke stock prices split/bonus ke liye adjusted hain ya nahi (`reports/adjusted_status.csv`).
+* **Naye derived columns** (`store/`, apne aap): `vega_DERIVED`; chain metrics mein ATM IV, 25-delta skew, near-minus-next term spread, gamma flip (PROXY); `iv_daily_DERIVED` (10:00 aur 14:00 ka ATM IV).
+* **Kam calls**: expire ho chuke contract ka poora expiry period ab ek hi call mein aata hai (pehle har hafte alag call). Weekly contract: 2 call se 1; BANKNIFTY monthly: ~5 se 1 (ESTIMATE, live nahi chala).
+* Recorder ke din har hafte ke folder mein `<INDEX>/recorder_quotes/` mein bhi aate hain.
+
+## 20. Sirf ek index ka data (`fetch`) — sabse aasaan tareeka
+```bash
+cd ~/boyu && bash termux_run.sh update
+```
+```bash
+bash termux_run.sh fetch
+```
+(Sirf `bash termux_run.sh` likhoge to bhi yahi menu khulega.)
+
+Example: menu mein pehle `1` (BANK NIFTY), phir `15` (15 hafte), phir Enter:
+```
+Kis index ka data chahiye?
+  1 = BANK NIFTY
+  2 = NIFTY 50
+  3 = SENSEX
+Number likho (1/2/3): 1
+Kitne hafte ka data chahiye (aaj se peeche)?
+  ...
+Hafte: 15
+BANK NIFTY | 15 hafte | 2026-08-01 se 2026-11-13
+Folder: /sdcard/Download/BOYU_Data/BANKNIFTY/
+Enter = shuru, n = ruk jao:
+```
+* Data jaata hai: `Download/BOYU_Data/BANKNIFTY/week_NN_<start>_to_<end>/` aur `Download/BOYU_Data/BANKNIFTY/INDEX.txt`. NIFTY aur SENSEX ke apne folder. Purane `BOYU_Data/week_...` folder ko haath nahi lagta.
+* Sirf chuna hua index + India VIX aata hai. BANK NIFTY: sirf bank stocks; NIFTY 50: heavyweights + Nifty50 list; SENSEX: heavyweights (Sensex ki list aapki file se). Global (USD INR, crude, GIFT Nifty) sirf `--with-globals` par.
+* Dobara chalao to jo hafte aa chuke hain woh dobara download nahi hote: sirf naye din. Pehle 2 hafte, baad mein 15 = sirf bache 13 hafte.
+* Beech mein ruk gaya (phone band, Ctrl+C, internet) to wahi command, wahi choice: jahan ruka wahin se aage.
+* Aakhir ke box mein `ADHURA` aaye to: `bash termux_run.sh repair`, phir wahi `fetch`.
+* Bina sawal ke: `bash termux_run.sh fetch --index BANKNIFTY --weeks 15 --yes`

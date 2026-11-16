@@ -62,5 +62,24 @@ cloud ke 22 s se kai guna (ESTIMATE 1-2 min). Target "8 minute ke andar" phone p
 * R1 review: SPREAD READY sirf jab Recorder ne ~90% session record kiya; adhoora options din PARTIAL; Excel (BOM) wali CSV ab chalti hai; galat owner file par exit 10.
 * Tests: 80 passed.
 
-## Baaki
-Derived extras (iv_daily, skew, vix_term, gamma_flip, vega), spread-report (Recorder data aane ke baad), Nifty50/Sensex stock lists (owner file), bhavcopy columns (real file chahiye).
+## v4.2 C3 + C4 aakhri hissa (same branch)
+* **C3, kam calls**: expire ho chuke option contract (D06/D08) ka poora expiry period (pichhli expiry se is expiry tak) ab ek call mein; agla batch use covered paata hai. 7-din ki batch window expiry ke saath line mein nahi hoti, isliye pehle har weekly contract do batches mein do call leta tha. Fixture (do batch, 4 contract per expiry): expired option calls 20 -> 16, data kuch kam nahi hua. Asli hafte: weekly contract 2 -> 1 call, BANKNIFTY monthly ~5 -> 1 (ESTIMATE). Calls per week before ~780 (measured 14 Nov); after: NOT RUN LIVE. DECISIONS 33(b) galat tha, 38 dekho.
+* **Bhavcopy columns VERIFIED** asli NSE UDiFF file (13 Nov 2026, 43,553 lines) se. Wahan `TtlTradgVol` = contracts (lots), OI = units; futures ka `OptnTp` khali. Reconciliation ab volume x `NewBrdLotQty` karta hai aur futures bhi milata hai (pehle kabhi match nahi hote the), aur ek merge mein (pehle har line par loop).
+* **D10 chalta hai**: Nifty 50 ki official list (niftyindices / nsearchives, 14 Nov 2026) `reference/stocks_nifty50_sensex.csv` mein; 43 naye stocks (7 D09 mein pehle se). Sensex ki list owner file. Manifest dono copies theek.
+* **Derived extras**: `vega_DERIVED`; `chain_metrics_1m` mein `atm_iv_DERIVED`, `skew_DERIVED` (25-delta), `vix_term_DERIVED` (near minus next ATM IV), `gamma_flip_PROXY`, `dte_bucket`; naya table `iv_daily_DERIVED` (10:00 / 14:00).
+* **`spread-report`**: Recorder files se asli spread (moneyness, expiry tak din, option type, ghanta). Har batch folder mein bhi.
+* **adjusted_status verdict**: `coverage` ab `corporate_actions.csv` ke SPLIT/BONUS din par stock candles dekh kar ADJUSTED / UNADJUSTED / MIXED batata hai (`reports/adjusted_status.csv`). Upstox data par NOT RUN LIVE (token nahi).
+* Recorder ke din per-index layout mein (`<INDEX>/recorder_quotes/`, 40 MB rule ke saath); `load_ai_ready()` default loader holdout nahi kholta.
+* Tests: 91 passed.
+
+## Baaki (sach)
+* Live numbers: calls per week after C3, minutes per week, holes before/after `repair` on the phone state: NOT RUN LIVE (token deleted). Owner ke pehle `continue` ke baad `holes.csv` aur final box mein dikhenge.
+* Sensex constituents, weights, events, corporate actions, participant OI: owner files (templates ready).
+* A, B aur C teeno ek hi PR (#4) mein hain, kyunki kaam ek hi branch par hota hai.
+
+## v5 (PROMPT_05): `fetch` — ek index, kitne hafte
+* `bash termux_run.sh fetch` (ya sirf `bash termux_run.sh`): menu poochta hai index (1 BANK NIFTY, 2 NIFTY 50, 3 SENSEX) aur hafte (koi bhi number), phir sirf wahi data aaj se peeche `Download/BOYU_Data/<INDEX>/` mein. Bina menu: `--index BANKNIFTY --weeks 15 --yes`.
+* Sirf chuna index + VIX: probe, plan, exchange data, validate, derive, reports, layout sab usi par. D09 BANK / HEAVY, D10 NIFTY50 / SENSEX / skip, D11 sirf `--with-globals`.
+* Apna cursor per index; dobara chalane par sirf naye din; ruk jaye to wahin se; `repair` fetch ke hafte bhi wapas laata hai.
+* Hard-coded NIFTY hata: planner windows, newest-day check, probe.
+* Tests: 102 passed (11 naye in `tests/test_v5_fetch.py`, sab mock transport par). Live API: NOT RUN LIVE.

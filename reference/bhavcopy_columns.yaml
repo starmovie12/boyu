@@ -1,8 +1,11 @@
-# bhavcopy_columns.yaml (table_version 2) -- maps published NSE UDiFF column names to internal names.
-# The mapping is UNVERIFIED: ingest prints the unmapped columns and never guesses.
-# If a name below is wrong, correct it here after looking at a real file.
-table_version: 2
-tag: UNVERIFIED
+# bhavcopy_columns.yaml (table_version 3) -- maps published NSE UDiFF column names to internal names.
+# VERIFIED on 14 Nov 2026 against a real file opened from nsearchives.nseindia.com
+# (BhavCopy_NSE_FO_0_0_0_20261113_F_0000.csv.zip, 43,553 rows): every name below is present.
+# Units seen in that file: TtlTradgVol = number of CONTRACTS (lots); OpnIntrst and ChngInOpnIntrst = units
+# (multiples of NewBrdLotQty). Futures rows have an empty OptnTp. FinInstrmTp: IDO index option, IDF index future,
+# STO stock option, STF stock future. ingest still prints any column it cannot find and never guesses.
+table_version: 3
+tag: VERIFIED_REAL_FILE
 columns:
   symbol:        TckrSymb
   expiry:        XpryDt
@@ -17,3 +20,5 @@ columns:
   volume:        TtlTradgVol
   trade_date:    TradDt
   instrument:    FinInstrmTp
+optional_columns:
+  lot_size:      NewBrdLotQty      # volume in units = TtlTradgVol x NewBrdLotQty

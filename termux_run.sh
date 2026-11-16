@@ -1,5 +1,8 @@
 #!/usr/bin/env bash
-# Termux non-interactive wrapper for updl (one WEEK per `continue`, newest first, then one week further back)
+# Termux wrapper for updl
+#   bash termux_run.sh            same as `fetch`: the menu asks which index and how many weeks
+#   bash termux_run.sh fetch      ONE index (1 = BANK NIFTY, 2 = NIFTY 50, 3 = SENSEX), N weeks back from today,
+#                                 into Download/BOYU_Data/<INDEX>/ (no menu: --index BANKNIFTY --weeks 15 --yes)
 #   bash termux_run.sh update     git pull + setup (run this after every code update)
 #   bash termux_run.sh setup      packages + .venv (run once, and again after `pkg upgrade`)
 #   bash termux_run.sh probe      Stage-0 probe (max 40 API calls)
@@ -9,6 +12,8 @@
 #   bash termux_run.sh repair     put failed chunks back in the queue (good chunks are never re-downloaded)
 #   bash termux_run.sh history    index + VIX 1-minute history from Jan 2022 (about 250 calls, no options)
 #   bash termux_run.sh record     live option-chain Recorder (market time only)
+#   bash termux_run.sh coverage   what is on disk; strategy-ready days; adjusted-price check
+#   bash termux_run.sh spread-report   real bid/ask spreads from the Recorder's days
 #   bash termux_run.sh export     phone CSV zip of the downloaded window
 #   bash termux_run.sh <command>  any other `python -m updl` command
 set -e
@@ -65,7 +70,7 @@ wake_lock() {
     say "[Termux] Agar Android process band kar de, wahi command dobara chalao. Kaam wahin se aage badhega."
 }
 
-ACTION="${1:-continue}"
+ACTION="${1:-fetch}"
 shift || true
 
 case "$ACTION" in
@@ -113,7 +118,7 @@ case "$ACTION" in
             exit 1
         fi
         case "$ACTION" in
-            probe|continue|month|next|download|record|repair|history) wake_lock ;;
+            probe|continue|month|next|download|record|repair|history|fetch) wake_lock ;;
         esac
         case "$ACTION" in
             continue|month|next) "$PYTHON_BIN" -m updl continue "$@" ;;

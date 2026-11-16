@@ -35,8 +35,9 @@ from .marketinfo import run_marketinfo
 from .messages import REPAIR_HINT, SDCARD_HINT
 from .plan import run_download
 from .probe import check_probe_fresh, run_probe
+from .spreadreport import recorder_days, run_spread_report
 from .runlock import RECORD_LOCK_NAME, RunLock
-from .sessions import Calendar, load_calendar
+from .sessions import Calendar, instrument_class, load_calendar
 from .state import FAILED_PERMANENT, FAILED_RETRYABLE, INCOMPLETE, State
 from .store import atomic_write_bytes, compact, date_of_part, list_parts
 from .timeutil import iso, to_date, today_ist, utc_iso
@@ -103,13 +104,30 @@ def next_batch(cursor: dict, today: dt.date, data_through: dt.date, window_days:
 
 
 # ---- newest day really served -----------------------------------------------------------------------------
+def index_key(settings: Settings, und: str) -> str:
+    """The index's real instrument key: from the cached instrument master (the probe saved it), never another
+    index's key. Only without any master the manifest name is used as is."""
+    key = settings.spot_key(und)
+    if not key.startswith("RESOLVE_FROM_MASTER:"):
+        return key
+    from .master import resolve_spot_key
+    from .plan import _load_cached_masters
+    try:
+        rows = _load_cached_masters(settings).get(settings.exchange_of(und), [])
+        if rows:
+            return resolve_spot_key(key, rows)[0]
+    except Exception:
+        pass
+    seg, name = key.split(":", 2)[1:]
+    return f"{seg}|{name}"
+
+
 def detect_data_through(settings: Settings, client: HttpClient, calendar: Calendar, today: dt.date) -> tuple:
     """(data_through, pending_days). data_through = the newest completed trading day whose index 1-minute
     session is (almost) complete in the historical API. Costs one call, more only while days are missing."""
-    key = settings.spot_key(settings.instrument_names()[0])
-    if key.startswith("RESOLVE_FROM_MASTER:"):
-        key = "NSE_INDEX|Nifty 50"
-    klass = "nse_spot_index"
+    und = settings.instrument_names()[0]       # fetch: the chosen index; continue: the first index, as before
+    key = index_key(settings, und)
+    klass = instrument_class("spot", und, exchange=settings.exchange_of(und))
     d = calendar.last_completed_trading_day(today)
     pending = []
     for _ in range(DATA_THROUGH_MAX_STEPS):
@@ -188,12 +206,44 @@ def copy_folder_to_phone(src: Path, root: Optional[Path], index_line: str) -> Op
         return None
 
 
+def other_indices(settings: Settings) -> set:
+    """fetch: every manifest index except the chosen one (empty when all indices are in use)."""
+    if not settings.only_index:
+        return set()
+    return {k for k in settings.manifest.get("instruments", {}) if k not in ("INDIAVIX", settings.only_index)}
+
+
+def _copy_report(src: Path, dest: Path, drop: set) -> None:
+    """Copy one report; with `drop` (fetch), leave out the rows / lines of the indices not chosen."""
+    if not drop:
+        shutil.copyfile(src, dest)
+        return
+    if src.suffix == ".csv":
+        import csv as _csv
+        with open(src, "r", encoding="utf-8", newline="") as fh:
+            reader = _csv.DictReader(fh)
+            fields = reader.fieldnames or []
+            rows = [r for r in reader if r.get("underlying") not in drop] if "underlying" in fields else list(reader)
+        with open(dest, "w", encoding="utf-8", newline="") as fh:
+            w = _csv.DictWriter(fh, fieldnames=fields)
+            w.writeheader()
+            w.writerows(rows)
+        return
+    text = src.read_text(encoding="utf-8")
+    import re as _re
+    keep = [ln for ln in text.splitlines()
+            if not any(_re.search(rf"(?<![A-Z]){u}(?![A-Z0-9])", ln) for u in drop)]
+    dest.write_text("\n".join(keep) + "\n", encoding="utf-8")
+
+
 def package_week(settings: Settings, tag: str, start: dt.date, end: dt.date, val_res: dict, lines: list,
-                 phone_dir: Optional[str] = None, tick=None) -> dict:
+                 phone_dir: Optional[str] = None, tick=None, sub: Optional[str] = None) -> dict:
     """Plain files for one batch: <INDEX>/ folders (1-minute CSV), ai_ready/ (Parquet), chain_15min/, store/,
     xcheck_csv/, reports, README_FOR_AI.md, week_summary.txt; plus a zip that stays on the Termux side.
-    Then the folder is copied to the phone."""
-    out_root = settings.workdir / "phone_outputs"
+    Then the folder is copied to the phone. sub (fetch): everything goes one level down, into <sub>/ on the
+    Termux side and Download/BOYU_Data/<sub>/ on the phone, and only the chosen index's files are packed."""
+    drop = other_indices(settings)
+    out_root = settings.workdir / "phone_outputs" / sub if sub else settings.workdir / "phone_outputs"
     week_dir = out_root / tag
     if week_dir.exists():
         shutil.rmtree(week_dir)
@@ -201,6 +251,8 @@ def package_week(settings: Settings, tag: str, start: dt.date, end: dt.date, val
     n_parquet = 0
     for part in ("dev", "holdout"):
         for p in list_parts(settings.store_dir, part):
+            if drop and p.parent.parent.name.split("=", 1)[-1] in drop:
+                continue                     # fetch: another index's Parquet stays out of this index's folder
             if start <= date_of_part(p) <= end:
                 dest = week_dir / "store" / p.relative_to(settings.store_dir)
                 dest.parent.mkdir(parents=True, exist_ok=True)
@@ -215,11 +267,14 @@ def package_week(settings: Settings, tag: str, start: dt.date, end: dt.date, val
     write_readme_for_ai(settings, start, end, week_dir)
     xcheck = settings.workdir / "xcheck_csv"
     if xcheck.exists():                 # small: the whole exchange-side folder travels with every batch
-        shutil.copytree(xcheck, week_dir / "xcheck_csv", copy_function=shutil.copyfile)
+        shutil.copytree(xcheck, week_dir / "xcheck_csv", copy_function=shutil.copyfile,
+                        ignore=(lambda _d, names: [n for n in names if n in drop]) if drop else None)
+    if recorder_days(settings, start, end):           # real bid/ask spreads of the recorded days in this window
+        run_spread_report(settings, start, end, say=lambda *_a: None)
     for rep in ("health.csv", "health_summary.txt", "reconciliation.csv", "day_status.csv", "holes.csv",
-                "strategy_ready_days.csv"):          # data_coverage.csv: only fresh, from `coverage` / export
+                "strategy_ready_days.csv", "spread_report.csv", "adjusted_status.csv"):          # data_coverage.csv: only fresh, from `coverage` / export
         if (settings.reports_dir / rep).exists():
-            shutil.copyfile(settings.reports_dir / rep, week_dir / rep)
+            _copy_report(settings.reports_dir / rep, week_dir / rep, drop)
     per_index = ", ".join(f"{u} {c['option_rows']} option-minutes / {c['contracts']} contracts" for u, c in lay.items())
     summary = [f"UPDL HAFTA {tag}", f"Hafta window  : {iso(start)} se {iso(end)}",
                f"Har index ka folder: {per_index}",
@@ -239,7 +294,8 @@ def package_week(settings: Settings, tag: str, start: dt.date, end: dt.date, val
     n_files, n_bytes = _dir_stats(week_dir)
     if tick:
         tick("phone copy")
-    phone = copy_folder_to_phone(week_dir, phone_root(phone_dir),
+    root = phone_root(phone_dir)
+    phone = copy_folder_to_phone(week_dir, (root / sub) if (root is not None and sub) else root,
                                  f"{tag} | {iso(start)}..{iso(end)} | files {n_files} | {n_bytes / 1e6:.1f} MB | {utc_iso()}")
     if phone is not None:
         shutil.rmtree(week_dir, ignore_errors=True)   # the phone has the folder and the zip stays here: no third copy
@@ -251,14 +307,43 @@ def package_week(settings: Settings, tag: str, start: dt.date, end: dt.date, val
 # ---- one batch ---------------------------------------------------------------------------------------------
 def _ensure_probe(settings: Settings, client: HttpClient, calendar: Calendar, secrets, say) -> None:
     try:
-        check_probe_fresh(settings, secrets=secrets)
+        data = check_probe_fresh(settings, secrets=secrets)
+        probed = data.get("probed_indices")
+        if settings.only_index and probed is not None and settings.only_index not in probed:
+            # fetch: the last probe tested another index only; test this one (and VIX) before downloading it
+            raise ProbeMissing(f"probe did not test {settings.only_index}")
     except ProbeTokenBlocked:
         raise
     except ProbeMissing:
-        say("[Hafta] probe_report purana ya missing hai. Pehle probe chala raha hoon (max 40 calls)...")
+        say("[Hafta] probe_report purana ya missing hai (ya is index ka nahi). Pehle probe chala raha hoon "
+            "(max 40 calls)...")
         saved = client.budget
         run_probe(settings, client, calendar=calendar)
         client.budget = saved
+
+
+def start_of_run(settings: Settings, client: HttpClient, base_calendar: Calendar, today: dt.date, secrets, say,
+                 log) -> None:
+    """Shared by `continue` and `fetch`: repair hint, rate window of earlier runs, the Recorder's share of the
+    30-minute cap, a fresh probe, and the exchange-side data that Upstox keeps for only about two weeks."""
+    from .repair import routing_failures
+    n_routing = routing_failures(settings)
+    if n_routing:
+        say(REPAIR_HINT.format(n=n_routing))
+    _load_rate_window(settings, client.limiter)
+    recorder = RunLock(settings.state_dir, "check", name=RECORD_LOCK_NAME).holder()
+    if recorder and recorder.get("calls_per_30min"):
+        # one account, one limit: leave the running Recorder its share of the 30-minute cap
+        share = int(recorder["calls_per_30min"])
+        client.limiter.max_per_30min = max(100, client.limiter.max_per_30min - share)
+        say(f"[Hafta] Recorder bhi chal raha hai: download ki 30-minute limit {share} calls kam karke "
+            f"{client.limiter.max_per_30min} rakhi (dono ek hi Upstox limit share karte hain).")
+    _ensure_probe(settings, client, base_calendar, secrets, say)
+    # exchange-side PCR / max pain / OI / FII-DII first: Upstox drops them after about two weeks
+    try:
+        run_marketinfo(settings, client, cached_calendar(settings, base_calendar), today, log=log, say=say)
+    except (ApiError, RetryExhausted) as err:
+        say(f"[Exchange data] abhi save nahi ho paya ({type(err).__name__}); agli baar phir koshish hogi.")
 
 
 def _failures_by_item(settings: Settings, since_utc: str) -> dict:
@@ -307,24 +392,7 @@ def run_week_batches(settings: Settings, client: HttpClient, calendar: Optional[
             "hafta cursor shuru ho raha hai. Jo din pehle se download hain woh dobara download nahi honge.")
 
     if not settings.dry_run:
-        from .repair import routing_failures
-        n_routing = routing_failures(settings)
-        if n_routing:
-            say(REPAIR_HINT.format(n=n_routing))
-        _load_rate_window(settings, client.limiter)
-        recorder = RunLock(settings.state_dir, "check", name=RECORD_LOCK_NAME).holder()
-        if recorder and recorder.get("calls_per_30min"):
-            # one account, one limit: leave the running Recorder its share of the 30-minute cap
-            share = int(recorder["calls_per_30min"])
-            client.limiter.max_per_30min = max(100, client.limiter.max_per_30min - share)
-            say(f"[Hafta] Recorder bhi chal raha hai: download ki 30-minute limit {share} calls kam karke "
-                f"{client.limiter.max_per_30min} rakhi (dono ek hi Upstox limit share karte hain).")
-        _ensure_probe(settings, client, base_calendar, secrets, say)
-        # exchange-side PCR / max pain / OI / FII-DII first: Upstox drops them after about two weeks
-        try:
-            run_marketinfo(settings, client, cached_calendar(settings, base_calendar), today, log=log, say=say)
-        except (ApiError, RetryExhausted) as err:
-            say(f"[Exchange data] abhi save nahi ho paya ({type(err).__name__}); agli baar phir koshish hogi.")
+        start_of_run(settings, client, base_calendar, today, secrets, say, log)
 
     result = {}
     for _ in range(max(1, int(weeks))):
@@ -373,15 +441,53 @@ def _one_batch(settings, client, base_calendar, cursor, today, window_days, floo
                 f"Agli baar `continue` chalane par yeh din apne aap aa jayega.")
 
     tag = f"week_{int(batch['batch_no']):02d}_{iso(start)}_to_{iso(end)}"
+    res = process_window(settings, client, calendar, start, end, tag, batch["started_utc"], pending_days, run_id,
+                         log, secrets, progress, say, phone_dir, t_start=t_start)
+    if res.get("dry_run"):
+        return {**res, "batch_no": batch["batch_no"]}
+    if not res.get("packaged"):
+        if res.get("interrupted") or res.get("stopped_by_limit"):
+            say(f"[Hafta Pause] Hafta #{batch['batch_no']} ({iso(start)}..{iso(end)}) abhi adhura hai. "
+                f"Wahi command dobara chalao, kaam wahin se aage badhega.")
+        return res
+    pkg = res["pkg"]
+
+    from .repair import drop_repaired_days
+    if batch.get("kind") != "repair":       # a repair batch re-visits old days: the walk cursors do not move
+        newest = to_date(cursor["newest_done"]) if cursor.get("newest_done") else None
+        cursor["newest_done"] = iso(max(end, newest) if newest else end)
+        cursor["next_end"] = batch["next_end"]
+    drop_repaired_days(cursor, start, end)
+    cursor["in_progress"] = None
+    cursor.setdefault("completed", []).append({**pkg, "batch_no": batch["batch_no"], "kind": batch.get("kind"),
+                                                "completed_utc": utc_iso()})
+    save_cursor(settings, cursor)
+
+    complete = res["status"] == "COMPLETE"
+    head = f"HAFTA #{batch['batch_no']} POORA (COMPLETE)" if complete else f"HAFTA #{batch['batch_no']} ADHURA (INCOMPLETE)"
+    box = [f"{head}: {iso(start)} se {iso(end)}", *res["box_body"], "Agla hafta: bash termux_run.sh continue"]
+    if progress is not None:
+        progress.box(box)
+    else:
+        for line in box:
+            print(line)
+    return {**res["result"], "batch_no": batch["batch_no"], "kind": batch.get("kind")}
+
+
+def process_window(settings, client, calendar, start: dt.date, end: dt.date, tag: str, since: str,
+                   pending_days: list, run_id, log, secrets, progress, say, phone_dir, t_start: float,
+                   sub: Optional[str] = None) -> dict:
+    """Download -> compact -> validate -> derive -> package for one window [start, end]. Shared by `continue`
+    (one global week cursor) and `fetch` (one cursor per index). It never touches a cursor itself.
+    Returns {"dry_run"...}, the download result when it stopped early, or {"packaged": True, ...}."""
     settings.set_param("TEST_START", iso(start))
     settings.set_param("TEST_END", iso(end))
 
     if settings.dry_run:
         res = run_download(settings, client, calendar, run_id=run_id, log=log, include_warmup=True, secrets=secrets)
-        return {"dry_run": True, "completed": False, "batch_no": batch["batch_no"], "start_date": iso(start),
-                "end_date": iso(end), "plan_summary": res}
+        return {"dry_run": True, "completed": False, "start_date": iso(start), "end_date": iso(end),
+                "plan_summary": res}
 
-    since = batch["started_utc"]
     calls_before = client.calls_made
     if progress is not None:
         progress.stage(1)
@@ -394,9 +500,7 @@ def _one_batch(settings, client, base_calendar, cursor, today, window_days, floo
         if dl_res.get("interrupted") or dl_res.get("stopped_by_limit"):
             if progress is not None:
                 progress.finish()
-            say(f"[Hafta Pause] Hafta #{batch['batch_no']} ({iso(start)}..{iso(end)}) abhi adhura hai. "
-                f"Wahi command dobara chalao, kaam wahin se aage badhega.")
-            return {**dl_res, "completed": False}
+            return {**dl_res, "completed": False, "calls": client.calls_made - calls_before}
         n_retry, _n_perm = _failed_since(settings, attempt_utc)
         if not n_retry:
             break
@@ -405,7 +509,8 @@ def _one_batch(settings, client, base_calendar, cursor, today, window_days, floo
                 progress.finish()
             say(f"[Hafta Retry] {n_retry} chunks do baar try karke bhi nahi aaye (network / server). "
                 f"Thodi der baad wahi command dobara chalao.")
-            return {"completed": False, "incomplete": True, "pending_chunks": n_retry}
+            return {"completed": False, "incomplete": True, "pending_chunks": n_retry,
+                    "calls": client.calls_made - calls_before}
     fail_by = _failures_by_item(settings, since)
     n_perm = sum(fail_by.values())
     t_dl = time.monotonic()
@@ -433,45 +538,28 @@ def _one_batch(settings, client, base_calendar, cursor, today, window_days, floo
                  + " (day_status.csv, holes.csv)")
     ready = write_strategy_ready(settings, calendar, start, end)
     lines.append(summary_line(ready) + " (strategy_ready_days.csv)")
-    pkg = package_week(settings, tag, start, end, val_res, lines, phone_dir, tick)
+    pkg = package_week(settings, tag, start, end, val_res, lines, phone_dir, tick, sub=sub)
     if progress is not None:
         progress.finish()
-
-    from .repair import drop_repaired_days
-    if batch.get("kind") != "repair":       # a repair batch re-visits old days: the walk cursors do not move
-        newest = to_date(cursor["newest_done"]) if cursor.get("newest_done") else None
-        cursor["newest_done"] = iso(max(end, newest) if newest else end)
-        cursor["next_end"] = batch["next_end"]
-    drop_repaired_days(cursor, start, end)
-    cursor["in_progress"] = None
-    cursor.setdefault("completed", []).append({**pkg, "batch_no": batch["batch_no"], "kind": batch.get("kind"),
-                                                "completed_utc": utc_iso()})
-    save_cursor(settings, cursor)
 
     total = time.monotonic() - t_start
     stage_s = dict(progress.stage_seconds) if progress is not None else {}
     complete = not fail_by
-    head = f"HAFTA #{batch['batch_no']} POORA (COMPLETE)" if complete else f"HAFTA #{batch['batch_no']} ADHURA (INCOMPLETE)"
-    box = [f"{head}: {iso(start)} se {iso(end)}",
-           *([] if complete else [f"  nahi aaya -> {item} {und}: {n} chunks" for (item, und), n in sorted(fail_by.items())]
-             + ["  Dobara lene ke liye: bash termux_run.sh repair  (phir continue)"]),
-           f"Total time {int(total // 60)}m {int(total % 60)}s | calls {calls} | retries {client.retries} | "
-           f"429 {client.count_429} | avg {calls / dl_min:.0f} calls/min",
-           "Stage seconds: " + ", ".join(f"{k} {v:.0f}" for k, v in stage_s.items()) if stage_s else
-           f"Valid days in store: {val_res.get('valid_trading_days', 0)}",
-           summary_line(ready),
-           f"Files {pkg['files']} | {pkg['mb']} MB",
-           f"Phone folder: {pkg['phone_path']}" if pkg["phone_path"] else f"Folder (Termux): {pkg['week_dir']}",
-           "Agla hafta: bash termux_run.sh continue"]
-    if progress is not None:
-        progress.box(box)
-    else:
-        for line in box:
-            print(line)
-    return {**pkg, "completed": True, "status": "COMPLETE" if complete else "INCOMPLETE",
-            "failed": {f"{i} {u}": n for (i, u), n in fail_by.items()}, "day_status": ds["counts"],
-            "batch_no": batch["batch_no"], "kind": batch.get("kind"), "calls": calls,
-            "seconds": round(total, 1), "stage_seconds": stage_s, "pending_days": [iso(d) for d in pending_days]}
+    body = [*([] if complete else [f"  nahi aaya -> {item} {und}: {n} chunks" for (item, und), n in sorted(fail_by.items())]
+              + ["  Dobara lene ke liye: bash termux_run.sh repair  (phir wahi command)"]),
+            f"Total time {int(total // 60)}m {int(total % 60)}s | calls {calls} | retries {client.retries} | "
+            f"429 {client.count_429} | avg {calls / dl_min:.0f} calls/min",
+            "Stage seconds: " + ", ".join(f"{k} {v:.0f}" for k, v in stage_s.items()) if stage_s else
+            f"Valid days in store: {val_res.get('valid_trading_days', 0)}",
+            summary_line(ready),
+            f"Files {pkg['files']} | {pkg['mb']} MB",
+            f"Phone folder: {pkg['phone_path']}" if pkg["phone_path"] else f"Folder (Termux): {pkg['week_dir']}"]
+    result = {**pkg, "completed": True, "status": "COMPLETE" if complete else "INCOMPLETE",
+              "failed": {f"{i} {u}": n for (i, u), n in fail_by.items()}, "day_status": ds["counts"],
+              "calls": calls, "seconds": round(total, 1), "stage_seconds": stage_s,
+              "pending_days": [iso(d) for d in pending_days]}
+    return {"packaged": True, "pkg": pkg, "status": result["status"], "box_body": body, "result": result,
+            "failed_chunks": n_perm, "calls": calls}
 
 
 def _days(a: dt.date, b: dt.date) -> list:
